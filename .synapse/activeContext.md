@@ -107,5 +107,16 @@
 - **`recordIndexTime` coverage fix:** `openProject()` and the "Done" button in the add-project sheet called `nodeBridge.indexAll()` directly — now both call `folderService.recordIndexTime(for: activeProjectId)` after success.
 - **Shift+Return → `optimizePrompt`:** `.onKeyPress` on prompt TextField: Shift+Return refines prompt via Grok (`optimizePrompt`); same guard conditions as Send (non-empty, no in-flight). Normal Return inserts newline.
 
+### GitHub repo + README (Mar 6, 2026)
+- **Git repo initialized:** First commit — 55 files across `SynapseAI/`, `node/`, `.synapse/`, `memory-bank/`.
+- **`.gitignore` updated:** Added `.cursor/` (separate git repo — `rmasso/cursorFolder`), `.synapse/*.db`, `.synapse/config.json`.
+- **README rewritten:** Marketing front page with hero tagline, "Why it matters in 2026" section, feature table, Quick Start, `.synapse/` memory structure diagram, project structure tree, roadmap (Phase 1 done / Phase 2-3 ahead).
+- **GitHub:** Public repo at `https://github.com/rmasso/Synapse`; user also has `rmasso/synapseAI` repo (target for future pushes).
+
+### Stale banner AI hint (planned, Mar 6, 2026)
+- **Plan created:** Strengthen primary stale warning line to mention asking AI to update `.synapse/`; add AI prompt hint to Index All button tooltip when stale.
+- **File:** `DashboardView.swift` — two edits: primary `staleBanner` text + `.help()` tooltip on Index All.
+- **Status:** Plan confirmed, not yet implemented.
+
 ## Last Injection
 ⌘⇧P hotkey injection fixed (see above). "Paste into [App]" button in Dashboard provides manual trigger when hotkey is unreliable.

@@ -53,5 +53,10 @@
 - **Shift+Return → Send:** keyboard shortcut now triggers `buildContextForPrompt` (was `optimizePrompt`).
 - **`recordIndexTime` fixed:** `openProject()` and add-project sheet "Done" button now record index time so stale banner clears correctly after those flows.
 
+- **GitHub repo:** Initialized git, wrote marketing README, pushed to `https://github.com/rmasso/Synapse` (55 files). `.gitignore` excludes `.cursor/`, `.synapse/*.db`, `.synapse/config.json`. Target repo: `rmasso/synapseAI`.
+- **Stale banner AI hint (planned):** Strengthen primary line to say "ask your AI to update the .synapse memory folder"; add same hint to Index All tooltip when stale. Pending implementation in `DashboardView.swift`.
+
 ## Next
-MVP feature-complete. UX polish pass done. Phase 2 scope definition when ready.
+- Push to `rmasso/synapseAI` GitHub repo (switch remote or re-push).
+- Implement stale banner AI hint in `DashboardView.swift` (two edits: `staleBanner` text + Index All `.help()` tooltip).
+- Phase 2 scope definition when ready.
