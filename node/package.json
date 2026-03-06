@@ -1,0 +1,19 @@
+{
+  "name": "synapse-node-bridge",
+  "version": "1.0.0",
+  "description": "Node bridge for Synapse: RPC over stdio, chokidar watch, SQLite FTS5, search, Grok",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test test/ping.test.js test/setProject.test.js test/search.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.6.0",
+    "chokidar": "^4.0.1"
+  },
+  "devDependencies": {},
+  "optionalDependencies": {}
+}

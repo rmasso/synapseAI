@@ -1,0 +1,37 @@
+# Xcode
+build/
+DerivedData/
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+xcuserdata/
+*.xccheckout
+*.moved-aside
+*.hmap
+*.ipa
+
+# Node
+node/node_modules/
+node/.env
+node/npm-debug.log*
+node/.npm
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+*.swp
+*~
+
+# Per-project .synapse (user data)
+# .synapse/
+.synapse/*.db
+.synapse/config.json
+
+# .cursor is a separate git repo (rmasso/cursorFolder)
+.cursor/
