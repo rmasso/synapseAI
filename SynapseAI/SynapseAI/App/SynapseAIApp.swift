@@ -7,6 +7,11 @@ import SwiftUI
 import AppKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Bring app to front so the Dashboard window (opened by WindowGroup-first) is visible.
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         HotkeyService.shared.unregister()
     }
@@ -43,6 +48,14 @@ struct SynapseAIApp: App {
     }
 
     var body: some Scene {
+        WindowGroup("Dashboard", id: "dashboard") {
+            DashboardView()
+                .environmentObject(nodeBridge)
+                .environmentObject(folderService)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 500, height: 400)
+
         MenuBarExtra {
             MenuBarView()
                 .environmentObject(nodeBridge)
@@ -51,14 +64,6 @@ struct SynapseAIApp: App {
             Image(systemName: "brain.head.profile")
         }
         .menuBarExtraStyle(.window)
-
-        WindowGroup("Dashboard", id: "dashboard") {
-            DashboardView()
-                .environmentObject(nodeBridge)
-                .environmentObject(folderService)
-        }
-        .windowStyle(.automatic)
-        .defaultSize(width: 500, height: 400)
     }
 
     // Last prompt entered in the Dashboard chat — reused as ⌘⇧P search query.

@@ -170,10 +170,24 @@ function handleRequest(msg) {
     return;
   }
 
+  if (method === "getAllConnections") {
+    if (!projectRoot) {
+      replyError(-32000, "No project set");
+      return;
+    }
+    try {
+      reply(db.getAllConnections());
+    } catch (err) {
+      replyError(-32000, err.message || "getAllConnections failed");
+    }
+    return;
+  }
+
   if (method === "buildContextForPrompt") {
     const apiKey = params[0];
     const userPrompt = params[1];
     const maxChunks = (Number.isInteger(params[2]) && params[2] >= 1) ? params[2] : undefined;
+    const memoryFirstMode = params[3] === true;
     if (!apiKey || typeof apiKey !== "string") {
       replyError(-32000, "Missing or invalid apiKey");
       return;
@@ -211,7 +225,7 @@ function handleRequest(msg) {
     const memorySnippets = grok.readSynapseFilesAsContext(projectRoot);
 
     grok
-      .suggestChunksForPrompt(apiKey, promptStr, descriptions, maxChunks)
+      .suggestChunksForPrompt(apiKey, promptStr, descriptions, maxChunks, memoryFirstMode)
       .then((out) => {
         const ids = out.chunkIds.filter((id) => Number.isInteger(id) && id > 0);
         const chunks = db.getChunksById(ids);

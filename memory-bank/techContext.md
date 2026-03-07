@@ -25,7 +25,7 @@ Synapse/
 ├── HITL_TEST_INSTRUCTIONS.md
 ├── SynapseAI/             # SwiftUI app
 │   ├── SynapseAI.xcodeproj/
-│   ├── SynapseAI/         # App, Core, Features, Services, Models, Resources
+│   ├── SynapseAI/         # App, Core, Features, Services, Models, Views, Resources
 │   ├── SynapseAITests/
 │   └── SynapseAIUITests/
 └── node/                  # Node bridge

@@ -2,7 +2,7 @@
 
 ## Architecture Overview
 - **SwiftUI app (SynapseAI)** – Menu bar only (LSUIElement); MenuBarExtra + WindowGroup("Dashboard", id: "dashboard"). No dock icon.
-- **Node bridge** – Subprocess; stdin/stdout JSON-RPC. Methods: `ping`, `setProject`, `indexFile`, `indexAll`, `search`, `suggestSkill`, `suggestLearnings`, `buildContextForPrompt`, `buildSubagentContext`, `getStats`. File-change events: `fileChanged`.
+- **Node bridge** – Subprocess; stdin/stdout JSON-RPC. Methods: `ping`, `setProject`, `indexFile`, `indexAll`, `search`, `suggestSkill`, `suggestLearnings`, `buildContextForPrompt`, `buildSubagentContext`, `getStats`, `getAllConnections`. File-change events: `fileChanged`.
 - **Per-project data** – `.synapse/` (created by Swift FolderService + Node `synapse-init.js`); `.synapse/synapse.db` (better-sqlite3 + FTS5); `.synapse/skills/`, `.synapse/ingested/`.
 
 ## Key Technical Decisions
@@ -21,5 +21,5 @@
 ## Component Relationships
 - **App** – Registers hotkey (init); AppDelegate unregisters on terminate. Run injection uses NodeBridgeService.search + AccessibilityService.paste.
 - **MenuBarView** – Open Project (FolderService + NodeBridge setProject); Open Dashboard (find window or openWindow); Quit.
-- **DashboardView** – Index All, Search, Drag-drop ingest, Grok Suggest Skill; displays status, memory files, thoughts, tokens, search results + Copy block.
-- **Node** – index.js routes RPC; setProject → initSynapseFolder + db.open + watch; indexFile/indexAll → chunk + upsertDocument; search → FTS5. **buildContextForPrompt:** FTS + suggestChunksForPrompt → getChunksById, dbSnippets + memorySnippets (grok.readSynapseFilesAsContext: projectbrief, activeContext, progress, thoughts, learnings) → grok.buildSkillFormatPrompt → skill.md block; fallback legacy @file block. **buildSubagentContext:** memorySnippets + smaller DB search → grok.buildSubagentContext (memory-heavy prompt). suggestSkill → grok.suggestAndCreateSkill + index; suggestLearnings → grok.suggestLearnings + append learnings.md.
+- **DashboardView** – Index All, Search, Drag-drop ingest, Grok Suggest Skill; displays status, memory files, thoughts, tokens, search results + Copy block. Memory Map button in Tools & Settings; optional embed in chat when empty.
+- **Node** – index.js routes RPC; setProject → initSynapseFolder + db.open + watch; indexFile/indexAll → chunk + upsertDocument; search → FTS5. **getAllConnections:** db.getAllConnections returns file nodes + chunk nodes (max 150) and derived connections (contains, reference, dependency). **buildContextForPrompt:** FTS + suggestChunksForPrompt → getChunksById, dbSnippets + memorySnippets (grok.readSynapseFilesAsContext: projectbrief, activeContext, progress, thoughts, learnings) → grok.buildSkillFormatPrompt → skill.md block; fallback legacy @file block. **buildSubagentContext:** memorySnippets + smaller DB search → grok.buildSubagentContext (memory-heavy prompt). suggestSkill → grok.suggestAndCreateSkill + index; suggestLearnings → grok.suggestLearnings + append learnings.md.

@@ -10,6 +10,7 @@
 | 4 – Injection | Done | ⌘⇧P, HotkeyService, AccessibilityService; paste or clipboard |
 | 5 – Grok skills | Done | suggestSkill RPC, grok.js; Dashboard API key + Suggest skill + token count |
 | 6 – Dashboard polish | Done | Last injection, memory files list, thoughts preview, Form + Sections UI |
+| 7 – Memory Map | Done | Graph viz of files + chunks; getAllConnections RPC; pinch/pan; embed in chat when empty |
 
 ## What Works
 - Menu bar app (no dock); Open Dashboard opens single window; New Project creates .synapse/ and templates (incl. learnings.md).
@@ -19,12 +20,14 @@
 - ⌘⇧P uses last Dashboard prompt; pastes into Cursor or clipboard; "Paste into [App]" when target app known.
 - Grok suggests/creates skill .md in .synapse/skills/; Update learnings appends to learnings.md from memory.
 - UI: Chat-style Dashboard (user/hit/block/subagentContext/error), collapsible Tools & Settings, token usage.
+- **Memory Map:** Tools & Settings → Memory Map button; graph of files (large) + chunks (small) with connections; pinch zoom, drag pan; optional "Show memory map in chat when empty" fills chat area; staged reveal (nodes → file-chunk edges → all edges).
 
 ## What’s Left / Known Issues
+- **Memory Map scope:** Shows all indexed docs (.synapse + additional folder). Run Index All to ensure .synapse nodes appear.
 - **node/index.js not found** – User must set Working Directory or SYNAPSE_NODE_SCRIPT when running from Xcode.
 - **MetalTools / DetachedSignatures** – Console noise from system; harmless.
 - **Multiple Dashboard windows** – Fixed by reusing window with title "Dashboard" before openWindow.
 - Phase 2 (post-MVP): domain subfolders, local LLM toggle, Cursor token tracking, etc. (see PRD).
 
 ## Current Status
-MVP feature-complete. Skill-format prompt and subagent context shipped. Memory bank at `memory-bank/`; .synapse/ per project. Next: UX/stability polish; Phase 2 scope when ready.
+MVP feature-complete. Skill-format prompt, subagent context, and Memory Map shipped. Memory bank at `memory-bank/`; .synapse/ per project. Next: UX/stability polish; Phase 2 scope when ready.

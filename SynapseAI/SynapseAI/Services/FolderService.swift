@@ -345,6 +345,20 @@ final class FolderService: ObservableObject {
         return text.components(separatedBy: .newlines).suffix(maxLines).joined(separator: "\n")
     }
 
+    /// Returns first `maxChars` of file content for a path relative to project root (e.g. ".synapse/projectbrief.md").
+    func filePreview(relativePath: String, maxChars: Int = 200) -> String? {
+        guard let root = projectPath else { return nil }
+        var url = URL(fileURLWithPath: root)
+        for component in relativePath.split(separator: "/").map(String.init) {
+            url = url.appendingPathComponent(component)
+        }
+        guard let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .utf8) else { return nil }
+        let trimmed = String(text.prefix(maxChars))
+        if text.count > maxChars { return trimmed + "…" }
+        return trimmed
+    }
+
     // MARK: - Index staleness tracking
 
     func lastIndexTime(for projectId: UUID?) -> Date? {

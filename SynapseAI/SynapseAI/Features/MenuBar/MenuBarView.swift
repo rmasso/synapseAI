@@ -3,6 +3,7 @@
 //  SynapseAI
 //
 
+import AppKit
 import SwiftUI
 
 struct MenuBarView: View {
@@ -89,6 +90,13 @@ struct MenuBarView: View {
         }
         .onChange(of: nodeBridge.isConnected) { _, _ in
             viewModel.refresh(from: nodeBridge)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("reopenDashboard"))) { _ in
+            if let window = NSApp.windows.first(where: { $0.title == "Dashboard" }) {
+                window.makeKeyAndOrderFront(nil)
+            } else {
+                openWindow(id: "dashboard")
+            }
         }
     }
 

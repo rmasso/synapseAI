@@ -46,6 +46,9 @@ struct DashboardView: View {
                 .tag(UUID?.some(Self.addTabSentinel))
         }
         .frame(minWidth: 500, minHeight: 640)
+        .onDisappear {
+            NotificationCenter.default.post(name: NSNotification.Name("reopenDashboard"), object: nil)
+        }
         .onAppear {
             selectedProjectId = folderService.activeProjectId
         }
@@ -274,6 +277,8 @@ private struct ProjectDashboardContent: View {
     @State private var fullscreenMessage: ChatMessage? = nil
     @State private var isShowingDeleteConfirmation: Bool = false
     @State private var isPromptCopied = false
+    @State private var showMemoryMap = false
+    @AppStorage("synapse.showMemoryMapInChat") private var showMemoryMapInChat = false
     /// Tick updated every 60 s so `isStale` re-evaluates without any user interaction.
     @State private var now = Date()
 
@@ -341,6 +346,11 @@ private struct ProjectDashboardContent: View {
         }
         .sheet(isPresented: $showOnboardingSheet) {
             onboardingSheet
+        }
+        .sheet(isPresented: $showMemoryMap) {
+            MemoryMapView(viewModel: viewModel)
+                .environmentObject(nodeBridge)
+                .environmentObject(folderService)
         }
         .sheet(item: $fullscreenMessage) { msg in
             FullscreenMessageSheet(message: msg)
@@ -504,23 +514,32 @@ private struct ProjectDashboardContent: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .transition(.opacity)
             } else {
-                ScrollViewReader { proxy in
-                    ScrollView(.vertical, showsIndicators: true) {
-                        VStack(alignment: .leading, spacing: 10) {
-                            if viewModel.chatMessages.isEmpty {
-                                chatEmptyState
+                Group {
+                    if viewModel.chatMessages.isEmpty, showMemoryMapInChat, folderService.projectPath != nil {
+                        MemoryMapView(viewModel: viewModel, embedInChat: true)
+                            .environmentObject(nodeBridge)
+                            .environmentObject(folderService)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        ScrollViewReader { proxy in
+                            ScrollView(.vertical, showsIndicators: true) {
+                                VStack(alignment: .leading, spacing: 10) {
+                                    if viewModel.chatMessages.isEmpty {
+                                        chatEmptyState
+                                    }
+                                    ForEach(viewModel.chatMessages) { msg in
+                                        chatMessageView(msg)
+                                    }
+                                    Color.clear.frame(height: 1).id("chatBottom")
+                                }
+                                .padding(.vertical, 12)
+                                .padding(.top, viewModel.chatMessages.isEmpty ? 0 : 28)
                             }
-                            ForEach(viewModel.chatMessages) { msg in
-                                chatMessageView(msg)
+                            .onChange(of: viewModel.chatMessages.count) { _, _ in
+                                withAnimation(.easeOut(duration: 0.2)) {
+                                    proxy.scrollTo("chatBottom", anchor: .bottom)
+                                }
                             }
-                            Color.clear.frame(height: 1).id("chatBottom")
-                        }
-                        .padding(.vertical, 12)
-                        .padding(.top, viewModel.chatMessages.isEmpty ? 0 : 28)
-                    }
-                    .onChange(of: viewModel.chatMessages.count) { _, _ in
-                        withAnimation(.easeOut(duration: 0.2)) {
-                            proxy.scrollTo("chatBottom", anchor: .bottom)
                         }
                     }
                 }
@@ -679,7 +698,7 @@ private struct ProjectDashboardContent: View {
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .padding(.horizontal, 14)
 
-        case .block(let count, let total, let savedTokens):
+        case .block(let count, let total, let savedTokens, let inputTokens, let outputTokens):
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
                     Image(systemName: "square.stack.3d.up.fill")
@@ -689,14 +708,21 @@ private struct ProjectDashboardContent: View {
                         Text("Skill prompt · \(count) of \(total) chunk\(total == 1 ? "" : "s") selected · copied to clipboard")
                             .font(.caption.bold())
                             .foregroundStyle(Color.accentColor)
-                        if savedTokens > 0 {
-                            HStack(spacing: 4) {
-                                Image(systemName: "arrow.down.circle.fill")
-                                    .foregroundStyle(.green)
+                        HStack(spacing: 8) {
+                            if inputTokens > 0 || outputTokens > 0 {
+                                Text("\(formattedTokens(inputTokens)) in / \(formattedTokens(outputTokens)) out")
                                     .font(.caption2)
-                                Text("~\(formattedTokens(savedTokens)) tokens saved vs. full context")
-                                    .font(.caption2.weight(.medium))
-                                    .foregroundStyle(.green)
+                                    .foregroundStyle(.secondary)
+                            }
+                            if savedTokens > 0 {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "arrow.down.circle.fill")
+                                        .foregroundStyle(.green)
+                                        .font(.caption2)
+                                    Text("~\(formattedTokens(savedTokens)) tokens saved vs. full context")
+                                        .font(.caption2.weight(.medium))
+                                        .foregroundStyle(.green)
+                                }
                             }
                         }
                     }
@@ -1170,7 +1196,7 @@ private struct ProjectDashboardContent: View {
             Section("Context Settings") {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
-                        Label("Max chunks", systemImage: "square.stack.3d.up")
+                        Label("Max Chunks for Context", systemImage: "square.stack.3d.up")
                         Spacer()
                         Text("\(viewModel.maxChunksForPrompt)")
                             .font(.caption.monospacedDigit())
@@ -1188,7 +1214,26 @@ private struct ProjectDashboardContent: View {
                     Text("Limits how many indexed chunks Grok can select per prompt. Lower = faster & cheaper; higher = broader context. Each chunk ≈ 300 tokens.")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
+                    Button {
+                        showMemoryMap = true
+                    } label: {
+                        Label("Memory Map", systemImage: "point.3.connected.trianglepath.dotted")
+                    }
+                    .buttonStyle(.borderless)
+                    Toggle("Show memory map in chat when empty", isOn: $showMemoryMapInChat)
+                        .font(.caption)
                 }
+            }
+
+            Section("Context Optimization") {
+                Text("Token estimation: skill prompt and subagent bubbles show pre/post Grok token counts (X in / Y out). Adjust max chunks and memory-first mode to minimize context window usage.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Toggle("Memory-First Mode", isOn: $viewModel.memoryFirstMode)
+                    .font(.caption)
+                Text("When enabled, prioritizes memory snippets (.synapse/) in chunk selection for skill prompts.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
 
             Section("Grok Skill Generator") {
@@ -1693,6 +1738,10 @@ struct ProcessAnimationView: View {
     @State private var stepIndex = 0
     let timer = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
     
+    private let nodeRadius: CGFloat = 8
+    private let stepSpacing: CGFloat = 56
+    private let connectionLineWidth: CGFloat = 3
+    
     private var steps: [(icon: String, text: String, color: Color)] {
         if isSubagent {
             return [
@@ -1719,10 +1768,57 @@ struct ProcessAnimationView: View {
         }
     }
     
+    
     var body: some View {
         let currentStep = steps[stepIndex % steps.count]
+        let activeIndex = stepIndex % steps.count
+        let resolvedSteps = steps  // capture concrete array with resolved colors
+        let stepCount = resolvedSteps.count
+        let spacing = stepSpacing
+        let radius = nodeRadius
+        let lineWidth = connectionLineWidth
         
         VStack(spacing: 16) {
+            // Step nodes + connections drawn via Canvas so Path strokes are visible
+            Canvas { ctx, size in
+                let centerY = size.height / 2
+                let totalWidth = size.width
+                let totalSpan = CGFloat(stepCount - 1) * spacing
+                let startX = (totalWidth - totalSpan) / 2
+
+                func cx(_ i: Int) -> CGFloat { startX + CGFloat(i) * spacing }
+
+                // Draw connections first (behind nodes)
+                for index in 1..<stepCount {
+                    var path = Path()
+                    path.move(to: CGPoint(x: cx(index - 1), y: centerY))
+                    path.addLine(to: CGPoint(x: cx(index), y: centerY))
+                    ctx.stroke(
+                        path,
+                        with: .color(Color.white.opacity(0.4)),
+                        style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+                    )
+                }
+
+                // Draw nodes on top
+                for index in 0..<stepCount {
+                    let isActive = index == activeIndex
+                    let stepColor = resolvedSteps[index].color
+                    let rect = CGRect(
+                        x: cx(index) - radius,
+                        y: centerY - radius,
+                        width: radius * 2,
+                        height: radius * 2
+                    )
+                    var circle = Path()
+                    circle.addEllipse(in: rect)
+                    ctx.fill(circle, with: .color(isActive ? stepColor : stepColor.opacity(0.3)))
+                    ctx.stroke(circle, with: .color(stepColor.opacity(isActive ? 1.0 : 0.4)), lineWidth: isActive ? 2 : 1)
+                }
+            }
+            .frame(height: 48)
+            .padding(.horizontal, 24)
+            
             ProgressView()
                 .scaleEffect(1.2)
                 .padding(.bottom, 4)

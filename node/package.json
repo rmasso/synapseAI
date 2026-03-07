@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node --test test/ping.test.js test/setProject.test.js test/search.test.js"
+    "test": "node --test test/ping.test.js test/setProject.test.js test/search.test.js test/getAllConnections.test.js test/grok.test.js"
   },
   "engines": {
     "node": ">=18"

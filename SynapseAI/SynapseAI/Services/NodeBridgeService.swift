@@ -453,8 +453,9 @@ final class NodeBridgeService: ObservableObject {
 
     /// User enters vague prompt; Grok gets index descriptions and suggests chunks; returns block (skill-format markdown or legacy) for clipboard.
     /// maxChunks: user-configurable cap forwarded to Node (1–10; default 5).
-    func buildContextForPrompt(apiKey: String, userPrompt: String, maxChunks: Int = 5) async -> Result<(block: String, optimizedPrompt: String?, chunkCount: Int, totalDescriptions: Int, estimatedSavedTokens: Int, inputTokens: Int, outputTokens: Int), Error> {
-        let result: Result<Any, Error> = await call("buildContextForPrompt", params: [apiKey, userPrompt, maxChunks])
+    /// memoryFirstMode: when true, prioritize memory chunks (.synapse/) in chunk selection.
+    func buildContextForPrompt(apiKey: String, userPrompt: String, maxChunks: Int = 5, memoryFirstMode: Bool = false) async -> Result<(block: String, optimizedPrompt: String?, chunkCount: Int, totalDescriptions: Int, estimatedSavedTokens: Int, inputTokens: Int, outputTokens: Int), Error> {
+        let result: Result<Any, Error> = await call("buildContextForPrompt", params: [apiKey, userPrompt, maxChunks, memoryFirstMode])
         switch result {
         case .success(let any):
             guard let dict = any as? [String: Any],
@@ -492,6 +493,35 @@ final class NodeBridgeService: ObservableObject {
     }
 
     /// Sharpen a rough prompt using Grok + project memory. Returns the refined prompt text + token counts.
+    /// Returns nodes (indexed files) and connections (fromId, toId, type, label) for memory map visualization.
+    func getAllConnections() async -> Result<(nodes: [MemoryMapNode], connections: [MemoryMapConnection]), Error> {
+        let result: Result<Any, Error> = await call("getAllConnections")
+        switch result {
+        case .success(let any):
+            guard let dict = any as? [String: Any],
+                  let nodesArr = dict["nodes"] as? [[String: Any]],
+                  let connArr = dict["connections"] as? [[String: Any]] else {
+                return .failure(NSError(domain: "NodeBridge", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid getAllConnections response"]))
+            }
+            let nodes = nodesArr.compactMap { n -> MemoryMapNode? in
+                guard let id = n["id"] as? String, let path = n["path"] as? String else { return nil }
+                let typeStr = n["type"] as? String ?? "file"
+                let type: MemoryMapNodeType = typeStr == "chunk" ? .chunk : .file
+                let docPath = n["documentPath"] as? String
+                return MemoryMapNode(id: id, path: path, type: type, documentPath: docPath)
+            }
+            let connections = connArr.compactMap { c -> MemoryMapConnection? in
+                guard let fromId = c["fromId"] as? String, let toId = c["toId"] as? String else { return nil }
+                let type = c["type"] as? String ?? "reference"
+                let label = c["label"] as? String ?? type
+                return MemoryMapConnection(fromId: fromId, toId: toId, type: type, label: label)
+            }
+            return .success((nodes: nodes, connections: connections))
+        case .failure(let err):
+            return .failure(err)
+        }
+    }
+
     func optimizePrompt(apiKey: String, userPrompt: String) async -> Result<(optimizedPrompt: String, inputTokens: Int, outputTokens: Int), Error> {
         let result: Result<Any, Error> = await call("optimizePrompt", params: [apiKey, userPrompt])
         switch result {

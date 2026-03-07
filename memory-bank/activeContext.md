@@ -18,6 +18,7 @@
 - Grok token estimation formula for cost display.
 
 ## Recent Changes
+- **Memory Map:** Graph visualization of indexed memory (files + chunks). Node RPC `getAllConnections`; `MemoryMapView` in `Views/`; file nodes (larger, bold) vs chunk nodes (smaller); skill.md shows folder name. Staged reveal via `.task(id:)` + `Task.sleep` (avoids Timer.publish bug with high-frequency redraws). Pinch zoom, drag pan. Toggle "Show memory map in chat when empty" in Context Settings. Performance: layout on background thread, 150 chunk cap, 45 force iterations.
 - **Skill-format prompt & subagent context:** (1) Main Send returns a single **skill.md** from Grok (YAML + Instructions/Examples/Troubleshooting, 800–1800 chars); inputs: user prompt + DB chunks + memory snippets. Legacy @file block fallback if Grok fails. (2) **Subagent context:** second button in prompt bar; memory-heavy context for parallel agent; Node buildSubagentContext RPC; ChatMessage.subagentContext; orange bubble.
 - Dashboard and Menu Bar UI modernized (Form + Sections, SF Symbols, Apple-style layout).
 - Window title fixed: `WindowGroup("Dashboard", id: "dashboard")` so “Open Dashboard” reuses one window.

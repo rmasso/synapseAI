@@ -145,4 +145,79 @@ function getChunksById(ids) {
   return ids.filter((id) => byId.has(id)).map((id) => byId.get(id));
 }
 
-module.exports = { open, getDb, getDbPath, close, upsertDocument, initSchema, getStats, getChunkDescriptions, getChunksById };
+/** Returns all documents for memory map nodes. */
+function getAllDocuments() {
+  if (!db) return [];
+  return db.prepare("SELECT id, path FROM documents ORDER BY path").all();
+}
+
+/** Returns chunks with content for connection inference (markdown links, @refs). */
+function getChunksForConnections() {
+  if (!db) return [];
+  return db.prepare("SELECT document_id, file_path, content FROM chunks").all();
+}
+
+/**
+ * Derive connections from chunk content (markdown links, @file refs).
+ * Returns { nodes: [{ id, path, type, documentPath? }], connections: [{ fromId, toId, type, label }] }.
+ * type: "file" | "chunk". Chunks have documentPath. No schema change.
+ */
+function getAllConnections() {
+  const docs = getAllDocuments();
+  const docPaths = new Set(docs.map((d) => d.path));
+  const connections = [];
+  const seen = new Set();
+
+  const fileNodes = docs.map((d) => ({ id: d.path, path: d.path, type: "file", documentPath: null }));
+
+  const MAX_CHUNKS = 150;
+  const chunkRows = db.prepare(
+    "SELECT id, document_id, file_path, content FROM chunks ORDER BY id LIMIT ?"
+  ).all(MAX_CHUNKS);
+  const docIdToPath = new Map(docs.map((d) => [d.id, d.path]));
+  const chunkNodes = chunkRows.map((r) => ({
+    id: "chunk-" + r.id,
+    path: r.file_path,
+    type: "chunk",
+    documentPath: r.file_path,
+  }));
+
+  const linkRe = /\]\s*\(\s*([^\s)]+\.md)\s*\)/gi;
+  const atRefRe = /@([^\s\[\]()]+\.md)/gi;
+
+  for (const c of chunkRows) {
+    const fromPath = c.file_path;
+    const fromChunkId = "chunk-" + c.id;
+    if (!fromPath) continue;
+    const content = c.content || "";
+
+    connections.push({ fromId: fromPath, toId: fromChunkId, type: "contains", label: "contains" });
+
+    const extractRefs = (regex, type, label) => {
+      let m;
+      const re = new RegExp(regex.source, regex.flags);
+      while ((m = re.exec(content)) !== null) {
+        let ref = m[1].trim();
+        if (ref.startsWith("./")) ref = ref.slice(2);
+        if (!ref.endsWith(".md")) continue;
+        const toPath = docPaths.has(ref) ? ref : Array.from(docPaths).find((p) => p.endsWith(ref) || ref.endsWith(p));
+        if (toPath && toPath !== fromPath) {
+          const key = `${fromChunkId}\0${toPath}\0${type}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            connections.push({ fromId: fromChunkId, toId: toPath, type, label });
+          }
+        }
+      }
+    };
+    extractRefs(linkRe, "reference", "references");
+    extractRefs(atRefRe, "dependency", "depends on");
+  }
+
+  return {
+    nodes: [...fileNodes, ...chunkNodes],
+    connections,
+  };
+}
+
+module.exports = { open, getDb, getDbPath, close, upsertDocument, initSchema, getStats, getChunkDescriptions, getChunksById, getAllDocuments, getAllConnections };

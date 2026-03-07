@@ -13,8 +13,8 @@ struct ChatMessage: Identifiable {
     enum Kind {
         case user
         case hit(path: String, startLine: Int, endLine: Int)
-        /// chunkCount: selected, totalAvailable: fed to Grok, estimatedSavedTokens: from Node
-        case block(chunkCount: Int, totalAvailable: Int, estimatedSavedTokens: Int)
+        /// chunkCount: selected, totalAvailable: fed to Grok, estimatedSavedTokens: from Node, inputTokens/outputTokens: Grok API usage
+        case block(chunkCount: Int, totalAvailable: Int, estimatedSavedTokens: Int, inputTokens: Int, outputTokens: Int)
         /// Subagent context (memory-heavy package for parallel agent)
         case subagentContext(inputTokens: Int, outputTokens: Int)
         /// Shift+Return refined prompt
@@ -76,6 +76,8 @@ final class DashboardViewModel: ObservableObject {
 
     // Context chunk limit (user-configurable via slider; 1–10; default 5)
     @AppStorage("synapse.maxChunksForPrompt") var maxChunksForPrompt: Int = 5
+    /// When true, prioritize memory chunks (.synapse/) in chunk selection for buildContextForPrompt.
+    @AppStorage("synapse.memoryFirstMode") var memoryFirstMode: Bool = false
 
     // Chat history
     @Published var chatMessages: [ChatMessage] = []
@@ -341,7 +343,7 @@ final class DashboardViewModel: ObservableObject {
         // Step 2: Build context block — on success, chat shows only [user, block]
         let hasGrok = !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         if hasGrok {
-            switch await nodeBridge.buildContextForPrompt(apiKey: apiKey, userPrompt: prompt, maxChunks: maxChunksForPrompt) {
+            switch await nodeBridge.buildContextForPrompt(apiKey: apiKey, userPrompt: prompt, maxChunks: maxChunksForPrompt, memoryFirstMode: memoryFirstMode) {
             case .success(let out):
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(out.block, forType: .string)
@@ -352,7 +354,9 @@ final class DashboardViewModel: ObservableObject {
                 chatMessages.append(ChatMessage(
                     kind: .block(chunkCount: out.chunkCount,
                                  totalAvailable: out.totalDescriptions,
-                                 estimatedSavedTokens: out.estimatedSavedTokens),
+                                 estimatedSavedTokens: out.estimatedSavedTokens,
+                                 inputTokens: out.inputTokens,
+                                 outputTokens: out.outputTokens),
                     text: out.block
                 ))
                 buildContextSuccess = "Copied · paste with ⌘V"
@@ -364,7 +368,7 @@ final class DashboardViewModel: ObservableObject {
                 NSPasteboard.general.setString(block, forType: .string)
                 nodeBridge.setLastInjectedBlock(block)
                 chatMessages.append(ChatMessage(
-                    kind: .block(chunkCount: hits.count, totalAvailable: hits.count, estimatedSavedTokens: 0),
+                    kind: .block(chunkCount: hits.count, totalAvailable: hits.count, estimatedSavedTokens: 0, inputTokens: 0, outputTokens: 0),
                     text: block
                 ))
                 buildContextSuccess = "Copied (Grok unavailable, used FTS) · paste with ⌘V"
@@ -378,7 +382,7 @@ final class DashboardViewModel: ObservableObject {
             NSPasteboard.general.setString(block, forType: .string)
             nodeBridge.setLastInjectedBlock(block)
             chatMessages.append(ChatMessage(
-                kind: .block(chunkCount: hits.count, totalAvailable: hits.count, estimatedSavedTokens: 0),
+                kind: .block(chunkCount: hits.count, totalAvailable: hits.count, estimatedSavedTokens: 0, inputTokens: 0, outputTokens: 0),
                 text: block
             ))
             buildContextSuccess = "Copied · paste with ⌘V"

@@ -23,6 +23,7 @@ node/.npm
 
 # macOS
 .DS_Store
+**/.DS_Store
 .AppleDouble
 .LSOverride
 *.swp
@@ -32,6 +33,8 @@ node/.npm
 # .synapse/
 .synapse/*.db
 .synapse/config.json
+.synapse/thoughts.md
+.synapse/learnings.md
 
 # .cursor is a separate git repo (rmasso/cursorFolder)
 .cursor/
