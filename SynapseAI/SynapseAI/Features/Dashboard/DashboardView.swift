@@ -43,6 +43,7 @@ private func memoryMapTabLog(_ msg: String) {
 struct DashboardView: View {
     @EnvironmentObject var nodeBridge: NodeBridgeService
     @EnvironmentObject var folderService: FolderService
+    @StateObject private var memoryMapCacheStore = MemoryMapCacheStore()
     @State private var selectedProjectId: UUID? = nil
 
     // Add-project sheet state (lives here so the + tab can show the sheet from DashboardView level)
@@ -59,6 +60,7 @@ struct DashboardView: View {
     @State private var addProjectMemoryPromptCopied = false
     @State private var showDeleteAlert = false
     @State private var projectToDelete: SynapseProject? = nil
+    @State private var currentAddProjectStep = 1
     @AppStorage("synapse.onboardingCompleted") private var onboardingCompleted = false
     @AppStorage("synapse.grokApiKey") private var grokApiKey = ""
 
@@ -66,6 +68,7 @@ struct DashboardView: View {
         VStack(spacing: 0) {
             customTabBar
             projectTabView
+                .environmentObject(memoryMapCacheStore)
         }
         .frame(minWidth: 500, minHeight: 640)
         .onDisappear {
@@ -100,8 +103,7 @@ struct DashboardView: View {
         }
     }
 
-    /// Shows only the selected project's content. On tab change the view is removed and recreated
-    /// so the memory map loads fresh for the new project.
+    /// Single content per selected project. MemoryMapCacheStore persists map per path across tab switches.
     @ViewBuilder
     private var projectTabView: some View {
         Group {
@@ -191,7 +193,7 @@ struct DashboardView: View {
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)
             }
-            .background(Color(NSColor.controlBackgroundColor))
+            .background(Color(NSColor.windowBackgroundColor))
             Divider()
         }
     }
@@ -206,7 +208,7 @@ struct DashboardView: View {
         onSelect: @escaping () -> Void,
         onClose: (() -> Void)?
     ) -> some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 6) {
             if let path = projectPath {
                 Button {
                     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
@@ -218,7 +220,7 @@ struct DashboardView: View {
                 .help("Show in Finder")
             }
             Button(action: onSelect) {
-                HStack(spacing: 4) {
+                HStack(spacing: 6) {
                     if projectPath == nil {
                         Image(systemName: systemImage)
                             .font(.system(size: 11, weight: .medium))
@@ -228,8 +230,8 @@ struct DashboardView: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
                 }
-                .padding(.leading, projectPath == nil ? 10 : 2)
-                .padding(.trailing, showClose ? 2 : 10)
+                .padding(.leading, projectPath == nil ? 12 : 6)
+                .padding(.trailing, showClose ? 6 : 12)
                 .padding(.vertical, 6)
                 .contentShape(Rectangle())
             }
@@ -246,7 +248,8 @@ struct DashboardView: View {
                 .help("Remove project from Synapse")
             }
         }
-        .background(isSelected ? Color(NSColor.selectedContentBackgroundColor) : Color.clear)
+        .padding(.horizontal, 8)
+        .background(isSelected ? Color(NSColor.selectedContentBackgroundColor).opacity(0.8) : Color(NSColor.controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
@@ -258,22 +261,29 @@ struct DashboardView: View {
         showDeleteAlert = false
     }
 
-    // MARK: - Add Project sheet (DashboardView-level, no viewModel dependency)
+    // MARK: - Add Project sheet (wizard-style, one step per screen)
 
     private var addProjectSheet: some View {
         VStack(spacing: 0) {
+            // Header
             HStack {
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text("Add Project")
-                        .font(.title2.weight(.bold))
-                    Text("Connect a Cursor workspace to Synapse.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(.title.weight(.bold))
+                    HStack(spacing: 8) {
+                        Text("Step \(currentAddProjectStep) of 6")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        addProjectStepDots
+                    }
                 }
                 Spacer()
-                Button("Cancel") { showAddProjectSheet = false }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(.secondary)
+                Button("Cancel") {
+                    showAddProjectSheet = false
+                    currentAddProjectStep = 1
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 24)
             .padding(.top, 24)
@@ -281,278 +291,395 @@ struct DashboardView: View {
 
             Divider()
 
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 0) {
-                    addSheetStep(
-                        number: "1",
-                        systemImage: "folder.badge.gear",
-                        iconColor: .accentColor,
-                        title: "Select project folder",
-                        description: "Synapse creates a .synapse memory folder (projectbrief, activeContext, progress, thoughts, learnings, codebase). This becomes your project's searchable memory.",
-                        isComplete: addProjectSheetPath != nil
-                    ) {
-                        if let path = addProjectSheetPath {
-                            HStack(spacing: 6) {
-                                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                                Text((path as NSString).lastPathComponent)
-                                    .font(.caption.weight(.medium))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1).truncationMode(.middle)
-                                Spacer()
-                                Button("Change…") {
-                                    if let newPath = folderService.openProjectPicker() {
-                                        addProjectSheetPath = newPath
-                                        Task { _ = await nodeBridge.setProject(newPath) }
-                                    }
-                                }
-                                .buttonStyle(.borderless).font(.caption)
-                            }
-                        } else {
-                            Button("Select folder…") {
-                                if let newPath = folderService.openProjectPicker() {
-                                    addProjectSheetPath = newPath
-                                    Task { _ = await nodeBridge.setProject(newPath) }
-                                }
-                            }
-                            .buttonStyle(.borderedProminent)
-                        }
-                    }
-
-                    Divider().padding(.horizontal, 24)
-
-                    addSheetStep(
-                        number: "2",
-                        systemImage: "doc.text.magnifyingglass",
-                        iconColor: .blue,
-                        title: "Project Type",
-                        description: "Is this a code project or a markdown folder? Synapse can index your full code for deeper agent context, or just .md files for pure knowledge bases.",
-                        isComplete: addProjectSheetPath != nil
-                    ) {
-                        Picker("Project Type", selection: Binding(
-                            get: { folderService.indexFullProject ? "code" : "md" },
-                            set: { newValue in
-                                _ = folderService.setIndexFullProject(newValue == "code")
-                            }
-                        )) {
-                            Text("Code Project (Full Index)").tag("code")
-                            Text("Knowledge Base (.md only)").tag("md")
-                        }
-                        .pickerStyle(.radioGroup)
-                        .horizontalRadioGroupLayout()
-                        .disabled(addProjectSheetPath == nil)
-                    }
-
-                    Divider().padding(.horizontal, 24)
-
-                    addSheetStep(
-                        number: "3",
-                        systemImage: "folder.badge.plus",
-                        iconColor: .purple,
-                        title: "Add skills folder",
-                        description: "Optional: index another folder (e.g. .Cursor) so its .md skills and knowledge files are searchable. Run Index All after adding.",
-                        isComplete: folderService.additionalIndexFolderPath != nil
-                    ) {
-                        HStack(spacing: 8) {
-                            if let rel = folderService.additionalIndexFolderPath {
-                                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                                Text(rel).font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                                Spacer()
-                                Button("Clear") {
-                                    folderService.writeAdditionalIndexFolder(nil)
-                                    addProjectExtraFolderSuccess = nil
-                                }
-                                .foregroundStyle(.red).buttonStyle(.borderless).font(.caption)
-                            } else {
-                                Button("Select folder…") {
-                                    addProjectExtraFolderError = nil
-                                    addProjectExtraFolderSuccess = nil
-                                    if let rel = folderService.openAdditionalIndexFolderPicker() {
-                                        addProjectExtraFolderSuccess = "Added: \(rel)"
-                                    } else if folderService.projectPath != nil {
-                                        addProjectExtraFolderError = "Folder must be inside the project folder."
-                                    }
-                                }
-                                .buttonStyle(.bordered)
-                                .disabled(addProjectSheetPath == nil && folderService.projectPath == nil)
-                                Text("Optional").font(.caption2).foregroundStyle(.tertiary)
-                            }
-                        }
-                        if let msg = addProjectExtraFolderSuccess {
-                            Label(msg, systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(.green)
-                        }
-                        if let err = addProjectExtraFolderError {
-                            Label(err, systemImage: "exclamationmark.circle.fill").font(.caption).foregroundStyle(.red)
-                        }
-                    }
-
-                    Divider().padding(.horizontal, 24)
-
-                    addSheetStep(
-                        number: "4",
-                        systemImage: "magnifyingglass",
-                        iconColor: .orange,
-                        title: "Index your memory",
-                        description: "Build the search index from your project. You must run this before using Self Synapse.",
-                        isComplete: addProjectIndexComplete
-                    ) {
-                        HStack(spacing: 10) {
-                            Button("Index All") {
-                                Task {
-                                    isIndexing = true
-                                    _ = await nodeBridge.indexAll()
-                                    if let pid = folderService.activeProjectId { folderService.recordIndexTime(for: pid) }
-                                    addProjectIndexComplete = true
-                                    isIndexing = false
-                                }
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(addProjectSheetPath == nil || isIndexing)
-                            if isIndexing { ProgressView().scaleEffect(0.7) }
-                            if addProjectIndexComplete { Image(systemName: "checkmark").foregroundColor(.green) }
-                        }
-                    }
-
-                    Divider().padding(.horizontal, 24)
-
-                    addSheetStep(
-                        number: "5",
-                        systemImage: "brain",
-                        iconColor: .indigo,
-                        title: "Self Synapse (Optional)",
-                        description: "Let Grok automatically read your indexed files and write your initial project memory. Requires an API key and a built index.",
-                        isComplete: selfSynapseSuccess != nil
-                    ) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            if grokApiKey.isEmpty {
-                                SecureField("Paste Grok API key…", text: $grokApiKey)
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(maxWidth: 300)
-                            }
-                            HStack {
-                                Button("Run Self Synapse") {
-                                    Task { await runSelfSynapseFromView() }
-                                }
-                                .buttonStyle(.bordered)
-                                .disabled(isSelfSynapsing || addProjectSheetPath == nil || grokApiKey.isEmpty || !addProjectIndexComplete)
-                                
-                                if isSelfSynapsing {
-                                    HStack(spacing: 6) {
-                                        ProgressView().scaleEffect(0.6).frame(width: 12, height: 12)
-                                        Text(nodeBridge.selfSynapseProgress ?? "Preparing...")
-                                            .font(.caption)
-                                            .foregroundStyle(.blue)
-                                            .contentTransition(.numericText())
-                                            .animation(.easeInOut(duration: 0.2), value: nodeBridge.selfSynapseProgress)
-                                    }
-                                }
-                            }
-                            if let msg = selfSynapseSuccess {
-                                Text(msg).font(.caption).foregroundStyle(.green)
-                            }
-                            if let err = selfSynapseError {
-                                Text(err).font(.caption).foregroundStyle(.red).lineLimit(2)
-                            }
-                        }
-                    }
-
-                    Divider().padding(.horizontal, 24)
-
-                    addSheetStep(
-                        number: "6",
-                        systemImage: "doc.on.clipboard",
-                        iconColor: .blue,
-                        title: "Remind Cursor to update memory",
-                        description: "Paste this into Cursor so the agent knows to refresh your memory files after setup.",
-                        isComplete: addProjectMemoryPromptCopied
-                    ) {
-                        HStack(spacing: 8) {
-                            Text("Update my .synapse memory folder (projectbrief, activeContext, progress, codebase).")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .textSelection(.enabled)
-                                .lineLimit(2)
-                            Spacer(minLength: 8)
-                            Button {
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString("Update my .synapse memory folder (projectbrief, activeContext, progress, codebase).", forType: .string)
-                                addProjectMemoryPromptCopied = true
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                                    addProjectMemoryPromptCopied = false
-                                }
-                            } label: {
-                                Image(systemName: addProjectMemoryPromptCopied ? "checkmark" : "doc.on.doc")
-                                    .foregroundStyle(addProjectMemoryPromptCopied ? .green : .secondary)
-                                    .scaleEffect(addProjectMemoryPromptCopied ? 1.1 : 1.0)
-                            }
-                            .buttonStyle(.borderless)
-                        }
-                        .padding(8)
-                        .background(Color.primary.opacity(0.05))
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                    }
-                }
-                .padding(.vertical, 8)
+            // Step content (single screen at a time)
+            ZStack {
+                addProjectStepContent
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .animation(.easeInOut(duration: 0.25), value: currentAddProjectStep)
 
             Divider()
 
+            // Footer navigation
             HStack {
-                Spacer()
-                AnimatedActionButton(action: {
-                    onboardingCompleted = true
-                    showAddProjectSheet = false
-                }, delayAction: true) { isSuccess in
-                    HStack(spacing: 4) {
-                        if isSuccess { Image(systemName: "checkmark").transition(.scale.combined(with: .opacity)) }
-                        Text("Done")
+                if currentAddProjectStep > 1 {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            currentAddProjectStep -= 1
+                        }
+                    } label: {
+                        Label("Back", systemImage: "chevron.left")
+                            .font(.subheadline.weight(.medium))
                     }
+                    .buttonStyle(.bordered)
                 }
-                .buttonStyle(.borderedProminent)
-                .padding(.horizontal, 24)
-                .padding(.vertical, 16)
+                Spacer()
+                if currentAddProjectStep < 6 {
+                    Button("Next") {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            currentAddProjectStep += 1
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(currentAddProjectStep == 1 && addProjectSheetPath == nil)
+                } else {
+                    AnimatedActionButton(action: {
+                        onboardingCompleted = true
+                        showAddProjectSheet = false
+                        currentAddProjectStep = 1
+                    }, delayAction: true) { isSuccess in
+                        HStack(spacing: 6) {
+                            if isSuccess {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(.green)
+                                    .transition(.scale.combined(with: .opacity))
+                            }
+                            Text("Done")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
+        }
+        .frame(width: 520, height: 480)
+        .onAppear { currentAddProjectStep = 1 }
+    }
+
+    private var addProjectStepDots: some View {
+        HStack(spacing: 6) {
+            ForEach(1...6, id: \.self) { step in
+                Circle()
+                    .fill(step == currentAddProjectStep ? Color.accentColor : (step < currentAddProjectStep ? Color.green.opacity(0.6) : Color.primary.opacity(0.15)))
+                    .frame(width: 6, height: 6)
+                    .scaleEffect(step == currentAddProjectStep ? 1.2 : 1)
             }
         }
-        .frame(minWidth: 480, minHeight: 380)
     }
 
     @ViewBuilder
-    private func addSheetStep<A: View>(
-        number: String,
-        systemImage: String,
+    private var addProjectStepContent: some View {
+        switch currentAddProjectStep {
+        case 1:
+            addProjectWizardStep(
+                icon: "folder.badge.gear",
+                iconColor: .accentColor,
+                title: "Select project folder",
+                description: "Synapse creates a .synapse memory folder (projectbrief, activeContext, progress, thoughts, learnings, codebase). This becomes your project's searchable memory."
+            ) {
+                if let path = addProjectSheetPath {
+                    HStack(spacing: 12) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.title2)
+                            .foregroundStyle(.green)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text((path as NSString).lastPathComponent)
+                                .font(.body.weight(.medium))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Text("Project folder selected")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Change…") {
+                            if let newPath = folderService.openProjectPicker() {
+                                addProjectSheetPath = newPath
+                                Task { _ = await nodeBridge.setProject(newPath) }
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .padding(16)
+                    .background(Color.primary.opacity(0.05))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                } else {
+                    Button {
+                        if let newPath = folderService.openProjectPicker() {
+                            addProjectSheetPath = newPath
+                            Task { _ = await nodeBridge.setProject(newPath) }
+                        }
+                    } label: {
+                        Label("Select folder…", systemImage: "folder.badge.plus")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 16)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                }
+            }
+            .transition(.asymmetric(
+                insertion: .opacity.combined(with: .move(edge: .trailing)),
+                removal: .opacity.combined(with: .move(edge: .leading))
+            ))
+        case 2:
+            addProjectWizardStep(
+                icon: "doc.text.magnifyingglass",
+                iconColor: .blue,
+                title: "Project Type",
+                description: "Is this a code project or a markdown folder? Synapse can index your full code for deeper agent context, or just .md files for pure knowledge bases."
+            ) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Picker("Project Type", selection: Binding(
+                        get: { folderService.indexFullProject ? "code" : "md" },
+                        set: { _ = folderService.setIndexFullProject($0 == "code") }
+                    )) {
+                        Text("Code Project (Full Index)").tag("code")
+                        Text("Knowledge Base (.md only)").tag("md")
+                    }
+                    .pickerStyle(.radioGroup)
+                    .horizontalRadioGroupLayout()
+                    .padding(16)
+                    .background(Color.primary.opacity(0.05))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                }
+            }
+            .transition(.asymmetric(
+                insertion: .opacity.combined(with: .move(edge: .trailing)),
+                removal: .opacity.combined(with: .move(edge: .leading))
+            ))
+        case 3:
+            addProjectWizardStep(
+                icon: "folder.badge.plus",
+                iconColor: .purple,
+                title: "Add skills folder",
+                description: "Optional: index another folder (e.g. .Cursor) so its .md skills and knowledge files are searchable. Run Index All after adding."
+            ) {
+                VStack(spacing: 12) {
+                    if let rel = folderService.additionalIndexFolderPath {
+                        HStack(spacing: 12) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.title2)
+                                .foregroundStyle(.green)
+                            Text(rel)
+                                .font(.body.weight(.medium))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button("Clear") {
+                                folderService.writeAdditionalIndexFolder(nil)
+                                addProjectExtraFolderSuccess = nil
+                            }
+                            .foregroundStyle(.red)
+                            .buttonStyle(.bordered)
+                        }
+                        .padding(16)
+                        .background(Color.primary.opacity(0.05))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    } else {
+                        Button {
+                            addProjectExtraFolderError = nil
+                            addProjectExtraFolderSuccess = nil
+                            if let rel = folderService.openAdditionalIndexFolderPicker() {
+                                addProjectExtraFolderSuccess = "Added: \(rel)"
+                            } else if folderService.projectPath != nil {
+                                addProjectExtraFolderError = "Folder must be inside the project folder."
+                            }
+                        } label: {
+                            Label("Select folder…", systemImage: "folder.badge.plus")
+                                .font(.headline)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 16)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.large)
+                        .disabled(addProjectSheetPath == nil && folderService.projectPath == nil)
+                        Text("Optional")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                    if let msg = addProjectExtraFolderSuccess {
+                        Label(msg, systemImage: "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    }
+                    if let err = addProjectExtraFolderError {
+                        Label(err, systemImage: "exclamationmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
+            .transition(.asymmetric(
+                insertion: .opacity.combined(with: .move(edge: .trailing)),
+                removal: .opacity.combined(with: .move(edge: .leading))
+            ))
+        case 4:
+            addProjectWizardStep(
+                icon: "magnifyingglass",
+                iconColor: .orange,
+                title: "Index your memory",
+                description: "Build the search index from your project. You must run this before using Self Synapse."
+            ) {
+                HStack(spacing: 16) {
+                    Button {
+                        Task {
+                            isIndexing = true
+                            _ = await nodeBridge.indexAll()
+                            if let pid = folderService.activeProjectId { folderService.recordIndexTime(for: pid) }
+                            if let path = folderService.projectPath {
+                                NotificationCenter.default.post(name: .indexAllCompleted, object: path)
+                            }
+                            addProjectIndexComplete = true
+                            isIndexing = false
+                        }
+                    } label: {
+                        Label("Index All", systemImage: "arrow.triangle.2.circlepath")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 16)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(addProjectSheetPath == nil || isIndexing)
+                    if isIndexing {
+                        ProgressView()
+                            .scaleEffect(0.9)
+                    }
+                    if addProjectIndexComplete {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.title2)
+                            .foregroundStyle(.green)
+                    }
+                }
+            }
+            .transition(.asymmetric(
+                insertion: .opacity.combined(with: .move(edge: .trailing)),
+                removal: .opacity.combined(with: .move(edge: .leading))
+            ))
+        case 5:
+            addProjectWizardStep(
+                icon: "brain",
+                iconColor: .indigo,
+                title: "Self Synapse (Optional)",
+                description: "Let Grok automatically read your indexed files and write your initial project memory. Requires an API key and a built index."
+            ) {
+                VStack(spacing: 16) {
+                    if grokApiKey.isEmpty {
+                        SecureField("Paste Grok API key…", text: $grokApiKey)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 320)
+                    }
+                    HStack(spacing: 12) {
+                        Button("Run Self Synapse") {
+                            Task { await runSelfSynapseFromView() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .disabled(isSelfSynapsing || addProjectSheetPath == nil || grokApiKey.isEmpty || !addProjectIndexComplete)
+                        if isSelfSynapsing {
+                            HStack(spacing: 8) {
+                                ProgressView().scaleEffect(0.7)
+                                Text(nodeBridge.selfSynapseProgress ?? "Preparing...")
+                                    .font(.caption)
+                                    .foregroundStyle(.blue)
+                                    .contentTransition(.numericText())
+                                    .animation(.easeInOut(duration: 0.2), value: nodeBridge.selfSynapseProgress)
+                            }
+                        }
+                    }
+                    if let msg = selfSynapseSuccess {
+                        Label(msg, systemImage: "checkmark.circle.fill")
+                            .font(.subheadline)
+                            .foregroundStyle(.green)
+                    }
+                    if let err = selfSynapseError {
+                        Text(err)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .lineLimit(2)
+                    }
+                }
+            }
+            .transition(.asymmetric(
+                insertion: .opacity.combined(with: .move(edge: .trailing)),
+                removal: .opacity.combined(with: .move(edge: .leading))
+            ))
+        case 6:
+            addProjectWizardStep(
+                icon: "doc.on.clipboard",
+                iconColor: .blue,
+                title: "Remind Cursor to update memory",
+                description: "Paste this into Cursor so the agent knows to refresh your memory files after setup."
+            ) {
+                HStack(spacing: 12) {
+                    Text("Update my .synapse memory folder (projectbrief, activeContext, progress, codebase).")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString("Update my .synapse memory folder (projectbrief, activeContext, progress, codebase).", forType: .string)
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+                            addProjectMemoryPromptCopied = true
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                            addProjectMemoryPromptCopied = false
+                        }
+                    } label: {
+                        Image(systemName: addProjectMemoryPromptCopied ? "checkmark.circle.fill" : "doc.on.doc")
+                            .font(.title2)
+                            .foregroundStyle(addProjectMemoryPromptCopied ? .green : .secondary)
+                            .scaleEffect(addProjectMemoryPromptCopied ? 1.15 : 1)
+                            .contentTransition(.symbolEffect(.replace))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(16)
+                .background(Color.primary.opacity(0.05))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+            }
+            .transition(.asymmetric(
+                insertion: .opacity.combined(with: .move(edge: .trailing)),
+                removal: .opacity.combined(with: .move(edge: .leading))
+            ))
+        default:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private func addProjectWizardStep<A: View>(
+        icon: String,
         iconColor: Color,
         title: String,
         description: String,
-        isComplete: Bool,
-        @ViewBuilder action: () -> A
+        @ViewBuilder content: () -> A
     ) -> some View {
-        HStack(alignment: .top, spacing: 16) {
+        VStack(spacing: 24) {
             ZStack {
                 Circle()
-                    .fill(isComplete ? Color.green.opacity(0.12) : iconColor.opacity(0.12))
-                    .frame(width: 44, height: 44)
-                Image(systemName: isComplete ? "checkmark" : systemImage)
-                    .font(.system(size: 18, weight: .medium))
-                    .foregroundStyle(isComplete ? .green : iconColor)
+                    .fill(iconColor.opacity(0.15))
+                    .frame(width: 80, height: 80)
+                Image(systemName: icon)
+                    .font(.system(size: 36, weight: .medium))
+                    .foregroundStyle(iconColor)
             }
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) {
-                    Text("Step \(number)")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.tertiary)
-                    if isComplete {
-                        Label("Done", systemImage: "checkmark.circle.fill")
-                            .font(.caption2).foregroundStyle(.green)
-                    }
-                }
-                Text(title).font(.subheadline.weight(.semibold))
+            .padding(.top, 32)
+
+            VStack(spacing: 8) {
+                Text(title)
+                    .font(.title2.weight(.bold))
+                    .multilineTextAlignment(.center)
                 Text(description)
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
                     .fixedSize(horizontal: false, vertical: true)
-                action().padding(.top, 2)
             }
+
+            content()
+                .padding(.top, 8)
+                .frame(maxWidth: .infinity)
+
+            Spacer(minLength: 24)
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 16)
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -707,6 +834,7 @@ private struct ProjectDashboardContent: View {
 
     @EnvironmentObject var nodeBridge: NodeBridgeService
     @EnvironmentObject var folderService: FolderService
+    @EnvironmentObject var memoryMapCacheStore: MemoryMapCacheStore
     @StateObject private var viewModel = DashboardViewModel()
     @AppStorage("synapse.grokApiKey") private var grokApiKey = ""
     @State private var isSettingsExpanded = false
@@ -760,7 +888,6 @@ private struct ProjectDashboardContent: View {
             if let p = project {
                 memoryMapTabLog("ProjectDashboardContent onAppear project=\(p.name) path=\((p.path as NSString).lastPathComponent) isTabSelected=\(isTabSelected) activeId=\(folderService.activeProjectId?.uuidString ?? "nil")")
             }
-            // Only one content is shown at a time; always run full setup when this view appears.
             viewModel.clearChatHistory()
             viewModel.refresh(from: nodeBridge)
             viewModel.refreshFolderContent(folderService: folderService)
@@ -801,6 +928,7 @@ private struct ProjectDashboardContent: View {
             MemoryMapView(viewModel: viewModel, projectPath: project?.path)
                 .environmentObject(nodeBridge)
                 .environmentObject(folderService)
+                .environmentObject(memoryMapCacheStore)
         }
         .sheet(item: $fullscreenMessage) { msg in
             FullscreenMessageSheet(message: msg)
@@ -811,6 +939,23 @@ private struct ProjectDashboardContent: View {
         .onReceive(NotificationCenter.default.publisher(for: .cycleSendMode)) { _ in
             withAnimation(.easeInOut(duration: 0.15)) {
                 sendMenuMode = sendMenuMode.next
+            }
+        }
+        .overlay {
+            if sendMenuPresented {
+                ZStack(alignment: .bottomTrailing) {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.7, blendDuration: 0)) {
+                                sendMenuPresented = false
+                            }
+                        }
+                        .ignoresSafeArea()
+                    sendMenuPopupContent
+                        .padding(.trailing, 18)
+                        .padding(.bottom, 55)
+                }
             }
         }
     }
@@ -976,6 +1121,7 @@ private struct ProjectDashboardContent: View {
                         MemoryMapView(viewModel: viewModel, embedInChat: true, projectPath: project?.path, isTabSelected: isTabSelected)
                             .environmentObject(nodeBridge)
                             .environmentObject(folderService)
+                            .environmentObject(memoryMapCacheStore)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
                         ScrollViewReader { proxy in
@@ -1450,38 +1596,35 @@ private struct ProjectDashboardContent: View {
             .animation(.easeInOut(duration: 0.2), value: sendMenuMode)
             .padding(.trailing, 2)
             
-            // Custom popup menu
-            if sendMenuPresented {
-                VStack(spacing: 4) {
-                    ForEach(SendMenuMode.allCases, id: \.rawValue) { mode in
-                        SendMenuItemView(
-                            mode: mode,
-                            isSelected: mode == sendMenuMode
-                        ) {
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.7, blendDuration: 0)) {
-                                sendMenuMode = mode
-                                sendMenuPresented = false
-                            }
-                        }
-                    }
-                }
-                .padding(8)
-                .background(
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(.regularMaterial)
-                        .shadow(color: Color.black.opacity(0.15), radius: 10, x: 0, y: 5)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color.secondary.opacity(0.2), lineWidth: 0.5)
-                        )
-                )
-                .frame(width: 240)
-                .offset(y: -44)
-                .transition(.scale(scale: 0.9, anchor: .bottomTrailing).combined(with: .opacity))
-                .zIndex(1)
-            }
         }
         .padding(.leading, 2)
+    }
+
+    private var sendMenuPopupContent: some View {
+        VStack(spacing: 4) {
+            ForEach(SendMenuMode.allCases, id: \.rawValue) { mode in
+                SendMenuItemView(
+                    mode: mode,
+                    isSelected: mode == sendMenuMode
+                ) {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.7, blendDuration: 0)) {
+                        sendMenuMode = mode
+                        sendMenuPresented = false
+                    }
+                }
+            }
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.regularMaterial)
+                .shadow(color: Color.black.opacity(0.15), radius: 10, x: 0, y: 5)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color.secondary.opacity(0.2), lineWidth: 0.5)
+                )
+        )
+        .frame(width: 240)
     }
 
     private func runSendAction(for mode: SendMenuMode) {
@@ -2268,6 +2411,7 @@ private struct ProjectDashboardContent: View {
             _ = await nodeBridge.setProject(path)
             _ = await nodeBridge.indexAll()
             if let pid = folderService.activeProjectId { folderService.recordIndexTime(for: pid) }
+            NotificationCenter.default.post(name: .indexAllCompleted, object: path)
             await viewModel.refreshStats(nodeBridge: nodeBridge)
             viewModel.refreshFolderContent(folderService: folderService)
         }

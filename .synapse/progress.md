@@ -15,7 +15,7 @@
 - Menu bar app (no dock); Open Dashboard = single window; New Project creates .synapse/ and templates (including learnings.md, codebase.md).
 - Node bridge: ping, setProject, indexAll, indexFile, search, suggestSkill, suggestLearnings, buildContextForPrompt, **buildSubagentContext**, **chatTurn**, getStats; fileChanged notifications.
 - **Chat-style Dashboard:** type a prompt → full-screen ProcessAnimationView during API call → chat shows only **user prompt + final block** (skill-format or subagent). No FTS hit bubbles. Block automatically on clipboard. Fallback: legacy @file block if Grok fails.
-- **Send mode menu:** Single send button in prompt bar (default icon = paperplane.fill); chevron opens upward menu to choose Prompt / Subagent / Chat (icon + title + description). Main button sends with selected mode. Same actions: buildContextForPrompt (prompt), buildSubagentContext (subagent), sendChatMessage (chat). Custom overlay, spring animation, hover highlights (SendMenuItemView).
+- **Send mode menu:** Single send button in prompt bar (default icon = paperplane.fill); chevron opens upward menu to choose Prompt / Subagent / Chat (icon + title + description). Main button sends with selected mode. Closes when user clicks away (full-screen tap target). Same actions: buildContextForPrompt (prompt), buildSubagentContext (subagent), sendChatMessage (chat). Custom overlay, spring animation, hover highlights (SendMenuItemView).
 - Token savings: block bubble shows "Skill prompt · X of Y chunks · ~N tokens saved" when Grok filtered chunks.
 - **⌘⇧P injection fixed:** captures target app pid before async work; uses `CGEvent.postToPid` for reliable ⌘V delivery; uses last Dashboard chat prompt as search query.
 - **"Paste into [App]" button:** appears in Dashboard input bar when a block + target app are known; one-tap re-paste.
@@ -23,7 +23,7 @@
 - **ProcessAnimationView:** Full-screen centered loading with step-by-step process (memory search, codebase scan, skill checks); clears chat during API call.
 - **Button feedback:** Copy/Done/Paste/Clear show animated "Copied", checkmark, etc.
 - **Delete confirmation:** Remove project shows "Delete Project?" alert before removal.
-- **Add project + tab:** + icon as rightmost tab; 2-step sheet (project + skills folder).
+- **Add project + tab:** + icon as rightmost tab; **6-step wizard** (one screen per step: Select folder → Project Type → Skills folder → Index All → Self Synapse → Remind Cursor); step dots, Back/Next, animations.
 - **Chat empty state:** Feature descriptions with icons (Generate Skill, Subagent, Chat, Refine).
 - **Chat mode:** Multi-turn conversation; Grok can search_project; MarkdownTextView for user/assistant bubbles.
 - Grok selection: default 10 chunks; "include every directly relevant chunk" so the skill is self-contained for the executing agent; domain isolation; slider 1–10 in Dashboard.
@@ -31,7 +31,7 @@
 - **Learnings:** .synapse/learnings.md template; "Update learnings" in Dashboard (Tools & Settings) runs Grok over project memory and appends dated bullets to learnings.md; preview in Dashboard; Cursor instructions mention learnings.md.
 - **Codebase map:** `.synapse/codebase.md` template (key files, UI controls, services); Grok gets correct types/names without indexing raw source; filled in for Synapse project itself.
 - **Additional index folder:** select any folder inside project (e.g. `.Cursor`) in Tools & Settings; stored in `.synapse/config.json`; indexed by Index All alongside `.synapse/`.
-- **Onboarding:** 4-step guided sheet (project, extra folder, index, API key); "Set up…" button in status bar when no project set.
+- **Onboarding:** 6-step wizard (same structure as Add Project); "Set up…" button in status bar when no project set.
 - **Index All creates missing templates:** `initSynapseFolder` called in Node's `indexAll`; `loadStoredBookmark` calls Swift `createSynapseFolderIfNeeded` — existing projects get new templates on app open.
 - **Dashboard memory list refreshes after Index All** (was missing; `refreshFolderContent` now called on success).
 - Drag & drop .md → ingest + index; success/error feedback; DB size in status bar.

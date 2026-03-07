@@ -566,6 +566,22 @@ final class NodeBridgeService: ObservableObject {
         }
     }
 
+    /// Chunk IDs and file paths from the last prompt's context (for memory map highlighting).
+    func getLastContextChunkIds() async -> Result<(chunkIds: [Int], filePaths: [String]), Error> {
+        let result: Result<Any, Error> = await call("getLastContextChunkIds")
+        switch result {
+        case .success(let any):
+            guard let dict = any as? [String: Any] else {
+                return .success((chunkIds: [], filePaths: []))
+            }
+            let ids = dict["chunkIds"] as? [Int] ?? []
+            let paths = dict["filePaths"] as? [String] ?? []
+            return .success((chunkIds: ids, filePaths: paths))
+        case .failure:
+            return .success((chunkIds: [], filePaths: []))
+        }
+    }
+
     func optimizePrompt(apiKey: String, userPrompt: String) async -> Result<(optimizedPrompt: String, inputTokens: Int, outputTokens: Int), Error> {
         let result: Result<Any, Error> = await call("optimizePrompt", params: [apiKey, userPrompt])
         switch result {

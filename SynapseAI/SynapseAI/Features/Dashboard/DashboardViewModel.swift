@@ -16,6 +16,23 @@ struct MemoryMapCache {
     let nodePositions: [String: CGPoint]
 }
 
+/// Shared cache store keyed by project path. Survives tab switches so each project's map is cached and not reloaded.
+@MainActor
+final class MemoryMapCacheStore: ObservableObject {
+    @Published private(set) var caches: [String: MemoryMapCache] = [:]
+    private var indexAllObserver: NSObjectProtocol?
+
+    init() {
+        indexAllObserver = NotificationCenter.default.addObserver(forName: .indexAllCompleted, object: nil, queue: .main) { [weak self] notification in
+            guard let path = notification.object as? String else { return }
+            self?.caches.removeValue(forKey: path)
+        }
+    }
+
+    func cache(for path: String) -> MemoryMapCache? { caches[path] }
+    func setCache(_ cache: MemoryMapCache) { caches[cache.projectPath] = cache }
+}
+
 // MARK: - Chat message model
 
 struct ChatMessage: Identifiable {
@@ -138,6 +155,9 @@ final class DashboardViewModel: ObservableObject {
             indexCount = count
             await refreshStats(nodeBridge: nodeBridge)
             memoryMapCache = nil
+            if let path = folderService?.projectPath {
+                NotificationCenter.default.post(name: .indexAllCompleted, object: path)
+            }
             let newChunkCount = dbStats?.chunkCount ?? 0
             chunkCountDelta = newChunkCount - (previousChunkCount ?? 0)
             Task {
@@ -455,6 +475,7 @@ final class DashboardViewModel: ObservableObject {
                     text: out.block
                 ))
                 buildContextSuccess = "Copied · paste with ⌘V"
+                NotificationCenter.default.post(name: .lastContextUpdated, object: nil)
             case .failure(let err):
                 // Grok failed – fall back to plain FTS block
                 let block = buildPromptBlock(from: hits)
@@ -483,4 +504,10 @@ final class DashboardViewModel: ObservableObject {
             buildContextSuccess = "Copied · paste with ⌘V"
         }
     }
+}
+
+extension Notification.Name {
+    static let lastContextUpdated = Notification.Name("lastContextUpdated")
+    /// Posted when indexAll succeeds; object = project path (String). Invalidates MemoryMapView cache for that project.
+    static let indexAllCompleted = Notification.Name("indexAllCompleted")
 }

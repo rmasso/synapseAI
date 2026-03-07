@@ -353,6 +353,19 @@ function handleRequest(msg) {
     return;
   }
 
+  if (method === "getLastContextChunkIds") {
+    if (!projectRoot) {
+      reply({ chunkIds: [], filePaths: [] });
+      return;
+    }
+    try {
+      reply(db.getLastContextChunkIds());
+    } catch (err) {
+      reply({ chunkIds: [], filePaths: [] });
+    }
+    return;
+  }
+
   if (method === "buildContextForPrompt") {
     const apiKey = params[0];
     const userPrompt = params[1];
@@ -441,6 +454,7 @@ function handleRequest(msg) {
         return grok
           .buildSkillFormatPrompt(apiKey, skillPrompt, dbSnippets, memorySnippets)
           .then((skillOut) => {
+            db.saveLastContext(ids);
             reply({
               ok: true,
               block: skillOut.content,
@@ -454,6 +468,7 @@ function handleRequest(msg) {
           })
           .catch((err) => {
             // Fallback: legacy block when Grok skill-format fails
+            db.saveLastContext(ids);
             const optimizedPrompt = out.optimizedPrompt || promptStr;
             const lines = [optimizedPrompt, ""];
             for (const c of chunks) {

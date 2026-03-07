@@ -32,6 +32,7 @@ struct MemoryMapView: View {
     @ObservedObject var viewModel: DashboardViewModel
     @EnvironmentObject var nodeBridge: NodeBridgeService
     @EnvironmentObject var folderService: FolderService
+    @EnvironmentObject var memoryMapCacheStore: MemoryMapCacheStore
     @Environment(\.dismiss) private var dismiss
 
     /// When true, hide header and embed in chat area (no Back button).
@@ -58,6 +59,8 @@ struct MemoryMapView: View {
     @State private var selectedNodeId: String?
     @State private var previewNodeId: String?
     @State private var layoutComplete = false
+    /// Node IDs from last prompt's context (chunk-X and file paths) — highlighted in blue.
+    @State private var lastContextHighlightIds: Set<String> = []
     /// Staged reveal: 1=files+chunks, 2=file-chunk edges, 3=all edges
     @State private var revealPhase: Int = 0
     private let fileNodeRadius: CGFloat = 10
@@ -97,6 +100,21 @@ struct MemoryMapView: View {
             if nowSelected {
                 memoryMapLog("onChange(isTabSelected)=true → refresh view effectivePath=\((effectiveProjectPath as NSString).lastPathComponent)")
                 tryRestoreFromCacheOrLoad()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .lastContextUpdated)) { _ in
+            refreshLastContextHighlight()
+        }
+    }
+
+    private func refreshLastContextHighlight() {
+        guard !effectiveProjectPath.isEmpty else { return }
+        Task {
+            if case .success(let ctx) = await nodeBridge.getLastContextChunkIds() {
+                var ids: Set<String> = []
+                for id in ctx.chunkIds { ids.insert("chunk-\(id)") }
+                for path in ctx.filePaths { ids.insert(path) }
+                await MainActor.run { lastContextHighlightIds = ids }
             }
         }
     }
@@ -157,6 +175,7 @@ struct MemoryMapView: View {
         let currentPositions = nodePositions
         let currentRevealPhase = revealPhase
         let currentSelectedNodeId = selectedNodeId
+        let currentHighlightIds = lastContextHighlightIds
         return TimelineView(.animation) { timeline in
             let phase = CGFloat(timeline.date.timeIntervalSinceReferenceDate) * 0.5
             GeometryReader { geo in
@@ -169,12 +188,14 @@ struct MemoryMapView: View {
                                           connections: currentConnections,
                                           nodePositions: currentPositions,
                                           revealPhase: currentRevealPhase,
-                                          selectedNodeId: currentSelectedNodeId)
+                                          selectedNodeId: currentSelectedNodeId,
+                                          lastContextHighlightIds: currentHighlightIds)
                             drawNodesData(ctx: ctx, size: size, phase: phase,
                                           nodes: currentNodes,
                                           nodePositions: currentPositions,
                                           revealPhase: currentRevealPhase,
-                                          selectedNodeId: currentSelectedNodeId)
+                                          selectedNodeId: currentSelectedNodeId,
+                                          lastContextHighlightIds: currentHighlightIds)
                         }
                         .id(nodes.first?.id ?? "empty")
                         .frame(width: size.width, height: size.height)
@@ -309,7 +330,8 @@ struct MemoryMapView: View {
                                connections: [MemoryMapConnection],
                                nodePositions: [String: CGPoint],
                                revealPhase: Int,
-                               selectedNodeId: String?) {
+                               selectedNodeId: String?,
+                               lastContextHighlightIds: Set<String> = []) {
         guard revealPhase >= 2 else { return }
         let cx = size.width / 2
         let cy = size.height / 2
@@ -321,7 +343,10 @@ struct MemoryMapView: View {
         }
         for conn in visibleConns {
             guard let from = nodePositions[conn.fromId], let to = nodePositions[conn.toId] else { continue }
-            let isHighlighted = selectedNodeId != nil && (conn.fromId == selectedNodeId || conn.toId == selectedNodeId)
+            let isSelected = selectedNodeId != nil && (conn.fromId == selectedNodeId || conn.toId == selectedNodeId)
+            let isLastContext = lastContextHighlightIds.contains(conn.fromId) && lastContextHighlightIds.contains(conn.toId)
+            let isHighlighted = isSelected || isLastContext
+            let strokeColor: Color = isSelected ? Color.accentColor : (isLastContext ? Color.blue : Color.gray.opacity(0.5))
             let fFrom = applyFloat(from, phase: phase)
             let fTo = applyFloat(to, phase: phase)
             var path = Path()
@@ -329,7 +354,7 @@ struct MemoryMapView: View {
             let p2 = CGPoint(x: cx + (fTo.x - canvasSize / 2), y: cy + (fTo.y - canvasSize / 2))
             path.move(to: p1)
             path.addLine(to: p2)
-            ctx.stroke(path, with: .color(isHighlighted ? Color.accentColor : Color.gray.opacity(0.5)), lineWidth: isHighlighted ? 2 : 1)
+            ctx.stroke(path, with: .color(strokeColor), lineWidth: isHighlighted ? 2 : 1)
         }
     }
 
@@ -337,7 +362,8 @@ struct MemoryMapView: View {
                                nodes: [MemoryMapNode],
                                nodePositions: [String: CGPoint],
                                revealPhase: Int,
-                               selectedNodeId: String?) {
+                               selectedNodeId: String?,
+                               lastContextHighlightIds: Set<String> = []) {
         guard revealPhase >= 1 else { return }
         let cx = size.width / 2
         let cy = size.height / 2
@@ -346,13 +372,15 @@ struct MemoryMapView: View {
             let radius: CGFloat = node.type == .file ? fileNodeRadius : chunkNodeRadius
             let fPos = applyFloat(pos, phase: phase)
             let isSelected = node.id == selectedNodeId
+            let isLastContext = lastContextHighlightIds.contains(node.id)
+            let nodeColor: Color = isSelected ? Color.accentColor : (isLastContext ? Color.blue : Color.primary)
+            let fillOpacity: Double = node.type == .file ? 0.9 : 0.5
+            let lineWidth: CGFloat = node.type == .file ? 2 : 0.5
             let screenPos = CGPoint(x: cx + (fPos.x - canvasSize / 2), y: cy + (fPos.y - canvasSize / 2))
             var path = Path()
             path.addEllipse(in: CGRect(x: screenPos.x - radius, y: screenPos.y - radius, width: radius * 2, height: radius * 2))
-            let fillOpacity: Double = node.type == .file ? 0.9 : 0.5
-            let lineWidth: CGFloat = node.type == .file ? 2 : 0.5
-            ctx.fill(path, with: .color(isSelected ? Color.accentColor : Color.primary.opacity(fillOpacity)))
-            ctx.stroke(path, with: .color(isSelected ? Color.accentColor : Color.primary.opacity(node.type == .file ? 0.9 : 0.4)), lineWidth: isSelected ? 2 : lineWidth)
+            ctx.fill(path, with: .color(nodeColor.opacity(isSelected || isLastContext ? 0.9 : fillOpacity)))
+            ctx.stroke(path, with: .color(nodeColor.opacity(node.type == .file ? 0.9 : 0.4)), lineWidth: (isSelected || isLastContext) ? 2 : lineWidth)
             if node.type == .file {
                 let fullTitle = node.displayLabel
                 let title = fullTitle.count > 24 ? String(fullTitle.prefix(21)) + "…" : fullTitle
@@ -378,11 +406,11 @@ struct MemoryMapView: View {
     }
 
     private func drawEdges(ctx: GraphicsContext, size: CGSize, phase: CGFloat) {
-        drawEdgesData(ctx: ctx, size: size, phase: phase, connections: connections, nodePositions: nodePositions, revealPhase: revealPhase, selectedNodeId: selectedNodeId)
+        drawEdgesData(ctx: ctx, size: size, phase: phase, connections: connections, nodePositions: nodePositions, revealPhase: revealPhase, selectedNodeId: selectedNodeId, lastContextHighlightIds: lastContextHighlightIds)
     }
 
     private func drawNodes(ctx: GraphicsContext, size: CGSize, phase: CGFloat) {
-        drawNodesData(ctx: ctx, size: size, phase: phase, nodes: nodes, nodePositions: nodePositions, revealPhase: revealPhase, selectedNodeId: selectedNodeId)
+        drawNodesData(ctx: ctx, size: size, phase: phase, nodes: nodes, nodePositions: nodePositions, revealPhase: revealPhase, selectedNodeId: selectedNodeId, lastContextHighlightIds: lastContextHighlightIds)
     }
 
     /// Cap nodes: at most maxMapNodes file nodes, then chunks (maxChunksPerFile per file) fill remaining slots; filter connections to kept nodes only.
@@ -409,26 +437,32 @@ struct MemoryMapView: View {
     }
 
     /// Use cached map for current project if valid; otherwise load from node and cache result.
+    /// Store persists across tab switches; viewModel used for ProcessAnimationView.
     private func tryRestoreFromCacheOrLoad() {
         let currentPath = effectiveProjectPath
         let pathLabel = (currentPath as NSString).lastPathComponent
-        if let cache = viewModel.memoryMapCache {
-            let cacheLabel = (cache.projectPath as NSString).lastPathComponent
-            if cache.projectPath == currentPath, !cache.nodes.isEmpty {
-                memoryMapLog("restoreFromCache HIT path=\(pathLabel) cachePath=\(cacheLabel) nodes=\(cache.nodes.count)")
-                nodes = cache.nodes
-                connections = cache.connections
-                nodePositions = cache.nodePositions
-                isLoading = false
-                errorMessage = nil
-                layoutComplete = true
-                revealPhase = 2
-                return
+        let cache = memoryMapCacheStore.cache(for: currentPath) ?? viewModel.memoryMapCache
+        if let c = cache, c.projectPath == currentPath, !c.nodes.isEmpty {
+            memoryMapLog("restoreFromCache HIT path=\(pathLabel) nodes=\(c.nodes.count)")
+            nodes = c.nodes
+            connections = c.connections
+            nodePositions = c.nodePositions
+            isLoading = false
+            errorMessage = nil
+            layoutComplete = true
+            revealPhase = 2
+            viewModel.memoryMapCache = c
+            Task {
+                if case .success(let ctx) = await nodeBridge.getLastContextChunkIds() {
+                    var ids: Set<String> = []
+                    for id in ctx.chunkIds { ids.insert("chunk-\(id)") }
+                    for path in ctx.filePaths { ids.insert(path) }
+                    await MainActor.run { lastContextHighlightIds = ids }
+                }
             }
-            memoryMapLog("restoreFromCache MISS path=\(pathLabel) cachePath=\(cacheLabel) (mismatch or empty) → load")
-        } else {
-            memoryMapLog("restoreFromCache MISS path=\(pathLabel) noCache → load")
+            return
         }
+        memoryMapLog("restoreFromCache MISS path=\(pathLabel) → load")
         loadConnections()
     }
 
@@ -459,20 +493,32 @@ struct MemoryMapView: View {
                         nodeRadius: fileNodeRadius
                     )
                 }.value
+                var highlightIds: Set<String> = []
+                if case .success(let ctx) = await nodeBridge.getLastContextChunkIds() {
+                    for id in ctx.chunkIds {
+                        highlightIds.insert("chunk-\(id)")
+                    }
+                    for path in ctx.filePaths {
+                        highlightIds.insert(path)
+                    }
+                }
+                let cache = MemoryMapCache(
+                    projectPath: currentPath,
+                    nodes: nodesToLayout,
+                    connections: connsToLayout,
+                    nodePositions: positions
+                )
                 await MainActor.run {
                     nodes = nodesToLayout
                     connections = connsToLayout
                     nodePositions = positions
+                    lastContextHighlightIds = highlightIds
                     isLoading = false
                     layoutComplete = true
                     revealPhase = 2
-                    viewModel.memoryMapCache = MemoryMapCache(
-                        projectPath: currentPath,
-                        nodes: nodesToLayout,
-                        connections: connsToLayout,
-                        nodePositions: positions
-                    )
-                    memoryMapLog("loadConnections SUCCESS path=\(pathLabel) nodes=\(nodesToLayout.count) cached into viewModel")
+                    viewModel.memoryMapCache = cache
+                    memoryMapCacheStore.setCache(cache)
+                    memoryMapLog("loadConnections SUCCESS path=\(pathLabel) nodes=\(nodesToLayout.count) cached")
                 }
             case .failure(let err):
                 await MainActor.run {

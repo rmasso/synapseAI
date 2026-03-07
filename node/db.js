@@ -62,6 +62,11 @@ function initSchema(database) {
       INSERT INTO chunks_fts(chunks_fts, rowid, content, file_path) VALUES('delete', old.id, old.content, old.file_path);
       INSERT INTO chunks_fts(rowid, content, file_path) VALUES (new.id, new.content, new.file_path);
     END;
+    CREATE TABLE IF NOT EXISTS last_context (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      chunk_ids TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
   `);
 }
 
@@ -249,4 +254,32 @@ function getAllConnections() {
   };
 }
 
-module.exports = { open, getDb, getDbPath, close, upsertDocument, initSchema, getStats, getChunkDescriptions, getChunksBatch, getChunksById, getAllDocuments, getAllConnections };
+/** Save the last prompt's selected chunk IDs for memory map highlighting. Overwrites previous. */
+function saveLastContext(chunkIds) {
+  if (!db) return;
+  const ids = Array.isArray(chunkIds) ? chunkIds.filter((id) => Number.isInteger(id) && id > 0) : [];
+  const json = JSON.stringify(ids);
+  const now = Math.floor(Date.now() / 1000);
+  db.prepare(
+    "INSERT INTO last_context (id, chunk_ids, updated_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET chunk_ids = excluded.chunk_ids, updated_at = excluded.updated_at"
+  ).run(json, now);
+}
+
+/** Get the last prompt's chunk IDs and their file paths for memory map highlighting. Returns { chunkIds, filePaths }. */
+function getLastContextChunkIds() {
+  if (!db) return { chunkIds: [], filePaths: [] };
+  const row = db.prepare("SELECT chunk_ids FROM last_context WHERE id = 1").get();
+  if (!row || !row.chunk_ids) return { chunkIds: [], filePaths: [] };
+  try {
+    const ids = JSON.parse(row.chunk_ids);
+    const chunkIds = Array.isArray(ids) ? ids.filter((id) => Number.isInteger(id) && id > 0) : [];
+    if (chunkIds.length === 0) return { chunkIds: [], filePaths: [] };
+    const chunks = getChunksById(chunkIds);
+    const filePaths = [...new Set(chunks.map((c) => c.file_path).filter(Boolean))];
+    return { chunkIds, filePaths };
+  } catch (_) {
+    return { chunkIds: [], filePaths: [] };
+  }
+}
+
+module.exports = { open, getDb, getDbPath, close, upsertDocument, initSchema, getStats, getChunkDescriptions, getChunksBatch, getChunksById, getAllDocuments, getAllConnections, saveLastContext, getLastContextChunkIds };

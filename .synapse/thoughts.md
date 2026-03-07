@@ -25,3 +25,5 @@
 - 2026-03-07: xAI tool format fix: 422 error; API requires nested `function` object. SEARCH_PROJECT_TOOL and skill-function-calling.md updated.
 - 2026-03-07: Chat markdown preview: MarkdownTextView (AttributedString) for user/assistant bubbles; FullscreenMessageSheet uses markdown for chat messages.
 - 2026-03-07: Prompt icon → paperplane.fill (bolder). .synapse updated.
+- 2026-03-07: Project tabs: increased padding (12/4), windowBackgroundColor for bar, selectedContentBackgroundColor.opacity(0.8) for selected tab. Send menu: close on click-away via full-screen overlay tap target.
+- 2026-03-07: MemoryMapView optimization: reverted ZStack (was showing wrong map). Single ProjectDashboardContent per tab; MemoryMapCacheStore (keyed by path) persists across tab switches so each project's map is correct and cached; indexAllCompleted clears store for re-indexed project.
