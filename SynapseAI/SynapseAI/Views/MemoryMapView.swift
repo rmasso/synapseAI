@@ -8,6 +8,24 @@
 import SwiftUI
 import AppKit
 
+// MARK: - Debug (filter console with "[MemoryMap]" to trace per-tab map: which path is used, cache hit/miss, load success/fail)
+private func memoryMapLog(_ msg: String) {
+    print("[MemoryMap] \(msg)")
+}
+
+/// Serializes setProject + getAllConnections so concurrent tab loads don't overwrite the Node's project and all get the same data.
+private actor MemoryMapLoadSerializer {
+    static let shared = MemoryMapLoadSerializer()
+    private init() {}
+    func runLoad(path: String, nodeBridge: NodeBridgeService) async -> Result<(nodes: [MemoryMapNode], connections: [MemoryMapConnection]), Error> {
+        // MainActor.run takes a synchronous closure; use a MainActor Task to run async work on the main actor.
+        await Task { @MainActor in
+            _ = await nodeBridge.setProject(path)
+            return await nodeBridge.getAllConnections()
+        }.value
+    }
+}
+
 // MARK: - MemoryMapView
 
 struct MemoryMapView: View {
@@ -18,6 +36,15 @@ struct MemoryMapView: View {
 
     /// When true, hide header and embed in chat area (no Back button).
     var embedInChat: Bool = false
+    /// When set, use this path for load/cache (per-tab project). Otherwise use folderService.projectPath.
+    var projectPath: String? = nil
+    /// When true, this tab is the selected one (so the map is visible). Keying view id with this forces onAppear when tab becomes selected.
+    var isTabSelected: Bool = true
+
+    private var effectiveProjectPath: String {
+        let path = projectPath ?? folderService.projectPath ?? ""
+        return path
+    }
 
     @State private var nodes: [MemoryMapNode] = []
     @State private var connections: [MemoryMapConnection] = []
@@ -30,7 +57,6 @@ struct MemoryMapView: View {
     @State private var dragOffset: CGSize = .zero
     @State private var selectedNodeId: String?
     @State private var previewNodeId: String?
-    @State private var floatPhase: CGFloat = 0
     @State private var layoutComplete = false
     /// Staged reveal: 1=files+chunks, 2=file-chunk edges, 3=all edges
     @State private var revealPhase: Int = 0
@@ -38,6 +64,9 @@ struct MemoryMapView: View {
     private let chunkNodeRadius: CGFloat = 5
     private let canvasSize: CGFloat = 800
     private let forceIterations = 45
+    /// Animation limits: max chunk nodes per file and max total nodes (files + chunks). Keeps map readable.
+    private let maxChunksPerFile = 5
+    private let maxMapNodes = 250
 
     private func nodeRadius(for node: MemoryMapNode) -> CGFloat {
         node.type == .file ? fileNodeRadius : chunkNodeRadius
@@ -59,7 +88,17 @@ struct MemoryMapView: View {
         }
         .frame(minWidth: 500, minHeight: embedInChat ? 320 : 480)
         .frame(maxWidth: embedInChat ? .infinity : nil, maxHeight: embedInChat ? .infinity : nil)
-        .onAppear { loadConnections() }
+        .id("\(effectiveProjectPath)")
+        .onAppear {
+            memoryMapLog("onAppear embedInChat=\(embedInChat) effectivePath=\((effectiveProjectPath as NSString).lastPathComponent) passedPath=\(projectPath.map { ($0 as NSString).lastPathComponent } ?? "nil")")
+            tryRestoreFromCacheOrLoad()
+        }
+        .onChange(of: isTabSelected) { _, nowSelected in
+            if nowSelected {
+                memoryMapLog("onChange(isTabSelected)=true → refresh view effectivePath=\((effectiveProjectPath as NSString).lastPathComponent)")
+                tryRestoreFromCacheOrLoad()
+            }
+        }
     }
 
     private var headerBar: some View {
@@ -112,58 +151,73 @@ struct MemoryMapView: View {
     }
 
     private var graphCanvas: some View {
-        GeometryReader { geo in
-            let size = geo.size
-            ZStack {
-                Color(NSColor.controlBackgroundColor)
+        // Snapshot state into locals so Canvas drawing closures capture the correct values for this render.
+        let currentNodes = nodes
+        let currentConnections = connections
+        let currentPositions = nodePositions
+        let currentRevealPhase = revealPhase
+        let currentSelectedNodeId = selectedNodeId
+        return TimelineView(.animation) { timeline in
+            let phase = CGFloat(timeline.date.timeIntervalSinceReferenceDate) * 0.5
+            GeometryReader { geo in
+                let size = geo.size
                 ZStack {
-                    Canvas { ctx, canvasSize in
-                        drawEdges(ctx: ctx, size: size)
-                        drawNodes(ctx: ctx, size: size)
+                    Color(NSColor.controlBackgroundColor)
+                    ZStack {
+                        Canvas { ctx, _ in
+                            drawEdgesData(ctx: ctx, size: size, phase: phase,
+                                          connections: currentConnections,
+                                          nodePositions: currentPositions,
+                                          revealPhase: currentRevealPhase,
+                                          selectedNodeId: currentSelectedNodeId)
+                            drawNodesData(ctx: ctx, size: size, phase: phase,
+                                          nodes: currentNodes,
+                                          nodePositions: currentPositions,
+                                          revealPhase: currentRevealPhase,
+                                          selectedNodeId: currentSelectedNodeId)
+                        }
+                        .id(nodes.first?.id ?? "empty")
+                        .frame(width: size.width, height: size.height)
+                        .allowsHitTesting(false)
+                        nodeTapOverlay(size: size, phase: phase)
                     }
                     .frame(width: size.width, height: size.height)
-                    .allowsHitTesting(false)
-                    nodeTapOverlay(size: size)
-                }
-                .frame(width: size.width, height: size.height)
-                .scaleEffect(scale)
-                .offset(x: offset.width + dragOffset.width, y: offset.height + dragOffset.height)
-                .gesture(
-                    MagnificationGesture()
-                        .onChanged { value in
-                            scale = baseScale * value
+                    .scaleEffect(scale)
+                    .offset(x: offset.width + dragOffset.width, y: offset.height + dragOffset.height)
+                    .gesture(
+                        MagnificationGesture()
+                            .onChanged { value in
+                                scale = baseScale * value
+                            }
+                            .onEnded { value in
+                                baseScale = max(0.3, min(3.0, baseScale * value))
+                                scale = baseScale
+                            }
+                    )
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 8)
+                            .onChanged { value in
+                                dragOffset = value.translation
+                            }
+                            .onEnded { value in
+                                offset.width += value.translation.width
+                                offset.height += value.translation.height
+                                dragOffset = .zero
+                            }
+                    )
+                    if let nodeId = previewNodeId, let node = nodes.first(where: { $0.id == nodeId }) {
+                        VStack {
+                            Spacer()
+                            nodePreviewPanel(node)
+                                .transition(.move(edge: .bottom).combined(with: .opacity))
                         }
-                        .onEnded { value in
-                            baseScale = max(0.3, min(3.0, baseScale * value))
-                            scale = baseScale
-                        }
-                )
-                .simultaneousGesture(
-                    DragGesture(minimumDistance: 8)
-                        .onChanged { value in
-                            dragOffset = value.translation
-                        }
-                        .onEnded { value in
-                            offset.width += value.translation.width
-                            offset.height += value.translation.height
-                            dragOffset = .zero
-                        }
-                )
-                if let nodeId = previewNodeId, let node = nodes.first(where: { $0.id == nodeId }) {
-                    VStack {
-                        Spacer()
-                        nodePreviewPanel(node)
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
                 }
             }
         }
-        .onReceive(Timer.publish(every: 1/20, on: .main, in: .common).autoconnect()) { _ in
-            floatPhase += 0.025
-        }
         .task(id: layoutComplete) {
             guard layoutComplete else { return }
-            revealPhase = 1
+            if revealPhase < 2 { revealPhase = 1 }
             for phase in 2...3 {
                 try? await Task.sleep(nanoseconds: 600_000_000)
                 revealPhase = phase
@@ -171,12 +225,11 @@ struct MemoryMapView: View {
         }
     }
 
-    private func nodeTapOverlay(size: CGSize) -> some View {
+    private func nodeTapOverlay(size: CGSize, phase: CGFloat) -> some View {
         ZStack {
             ForEach(visibleNodes()) { node in
                 if let pos = nodePositions[node.id] {
-                    let center = viewToScreen(pos, size: size)
-                    let floatPos = applyFloat(pos)
+                    let floatPos = applyFloat(pos, phase: phase)
                     let screenCenter = viewToScreen(floatPos, size: size)
                     let hitSize: CGFloat = node.type == .file ? 44 : 28
                     Button {
@@ -236,11 +289,11 @@ struct MemoryMapView: View {
         .padding(16)
     }
 
-    private func applyFloat(_ p: CGPoint) -> CGPoint {
+    private func applyFloat(_ p: CGPoint, phase: CGFloat) -> CGPoint {
         let amp: CGFloat = 3
-        let freq = 0.4
-        let dx = sin(floatPhase + CGFloat(p.x) * 0.01) * amp
-        let dy = cos(floatPhase * 0.7 + CGFloat(p.y) * 0.01) * amp
+        let freq: CGFloat = 0.7
+        let dx = sin(phase + CGFloat(p.x) * 0.01) * amp
+        let dy = cos(phase * freq + CGFloat(p.y) * 0.01) * amp
         return CGPoint(x: p.x + dx, y: p.y + dy)
     }
 
@@ -248,6 +301,65 @@ struct MemoryMapView: View {
         let cx = size.width / 2
         let cy = size.height / 2
         return CGPoint(x: cx + (p.x - canvasSize / 2), y: cy + (p.y - canvasSize / 2))
+    }
+
+    // MARK: - Pure-data drawing (pass all state explicitly so Canvas closure captures correct values)
+
+    private func drawEdgesData(ctx: GraphicsContext, size: CGSize, phase: CGFloat,
+                               connections: [MemoryMapConnection],
+                               nodePositions: [String: CGPoint],
+                               revealPhase: Int,
+                               selectedNodeId: String?) {
+        guard revealPhase >= 2 else { return }
+        let cx = size.width / 2
+        let cy = size.height / 2
+        let visibleConns = connections.filter { conn in
+            let fromIsChunk = conn.fromId.hasPrefix("chunk-")
+            let toIsChunk = conn.toId.hasPrefix("chunk-")
+            if revealPhase == 2 { return fromIsChunk != toIsChunk }
+            return true
+        }
+        for conn in visibleConns {
+            guard let from = nodePositions[conn.fromId], let to = nodePositions[conn.toId] else { continue }
+            let isHighlighted = selectedNodeId != nil && (conn.fromId == selectedNodeId || conn.toId == selectedNodeId)
+            let fFrom = applyFloat(from, phase: phase)
+            let fTo = applyFloat(to, phase: phase)
+            var path = Path()
+            let p1 = CGPoint(x: cx + (fFrom.x - canvasSize / 2), y: cy + (fFrom.y - canvasSize / 2))
+            let p2 = CGPoint(x: cx + (fTo.x - canvasSize / 2), y: cy + (fTo.y - canvasSize / 2))
+            path.move(to: p1)
+            path.addLine(to: p2)
+            ctx.stroke(path, with: .color(isHighlighted ? Color.accentColor : Color.gray.opacity(0.5)), lineWidth: isHighlighted ? 2 : 1)
+        }
+    }
+
+    private func drawNodesData(ctx: GraphicsContext, size: CGSize, phase: CGFloat,
+                               nodes: [MemoryMapNode],
+                               nodePositions: [String: CGPoint],
+                               revealPhase: Int,
+                               selectedNodeId: String?) {
+        guard revealPhase >= 1 else { return }
+        let cx = size.width / 2
+        let cy = size.height / 2
+        for node in nodes {
+            guard let pos = nodePositions[node.id] else { continue }
+            let radius: CGFloat = node.type == .file ? fileNodeRadius : chunkNodeRadius
+            let fPos = applyFloat(pos, phase: phase)
+            let isSelected = node.id == selectedNodeId
+            let screenPos = CGPoint(x: cx + (fPos.x - canvasSize / 2), y: cy + (fPos.y - canvasSize / 2))
+            var path = Path()
+            path.addEllipse(in: CGRect(x: screenPos.x - radius, y: screenPos.y - radius, width: radius * 2, height: radius * 2))
+            let fillOpacity: Double = node.type == .file ? 0.9 : 0.5
+            let lineWidth: CGFloat = node.type == .file ? 2 : 0.5
+            ctx.fill(path, with: .color(isSelected ? Color.accentColor : Color.primary.opacity(fillOpacity)))
+            ctx.stroke(path, with: .color(isSelected ? Color.accentColor : Color.primary.opacity(node.type == .file ? 0.9 : 0.4)), lineWidth: isSelected ? 2 : lineWidth)
+            if node.type == .file {
+                let fullTitle = node.displayLabel
+                let title = fullTitle.count > 24 ? String(fullTitle.prefix(21)) + "…" : fullTitle
+                ctx.draw(Text(title).font(.caption).foregroundStyle(.primary),
+                         at: CGPoint(x: screenPos.x, y: screenPos.y + radius + 12), anchor: .top)
+            }
+        }
     }
 
     private func visibleConnections() -> [MemoryMapConnection] {
@@ -265,63 +377,79 @@ struct MemoryMapView: View {
         return nodes
     }
 
-    private func drawEdges(ctx: GraphicsContext, size: CGSize) {
-        let cx = size.width / 2
-        let cy = size.height / 2
-        for conn in visibleConnections() {
-            guard let from = nodePositions[conn.fromId], let to = nodePositions[conn.toId] else { continue }
-            let isHighlighted = selectedNodeId != nil && (conn.fromId == selectedNodeId || conn.toId == selectedNodeId)
-            let fFrom = applyFloat(from)
-            let fTo = applyFloat(to)
-            var path = Path()
-            let p1 = CGPoint(x: cx + (fFrom.x - canvasSize / 2), y: cy + (fFrom.y - canvasSize / 2))
-            let p2 = CGPoint(x: cx + (fTo.x - canvasSize / 2), y: cy + (fTo.y - canvasSize / 2))
-            path.move(to: p1)
-            path.addLine(to: p2)
-            ctx.stroke(
-                path,
-                with: .color(isHighlighted ? Color.accentColor : Color.gray.opacity(0.5)),
-                lineWidth: isHighlighted ? 2 : 1
-            )
-        }
+    private func drawEdges(ctx: GraphicsContext, size: CGSize, phase: CGFloat) {
+        drawEdgesData(ctx: ctx, size: size, phase: phase, connections: connections, nodePositions: nodePositions, revealPhase: revealPhase, selectedNodeId: selectedNodeId)
     }
 
-    private func drawNodes(ctx: GraphicsContext, size: CGSize) {
-        let cx = size.width / 2
-        let cy = size.height / 2
-        for node in visibleNodes() {
-            guard let pos = nodePositions[node.id] else { continue }
-            let radius = nodeRadius(for: node)
-            let fPos = applyFloat(pos)
-            let isSelected = node.id == selectedNodeId
-            let screenPos = CGPoint(x: cx + (fPos.x - canvasSize / 2), y: cy + (fPos.y - canvasSize / 2))
-            var path = Path()
-            path.addEllipse(in: CGRect(x: screenPos.x - radius, y: screenPos.y - radius, width: radius * 2, height: radius * 2))
-            let fillOpacity: Double = node.type == .file ? 0.9 : 0.5
-            let lineWidth: CGFloat = node.type == .file ? 2 : 0.5
-            ctx.fill(path, with: .color(isSelected ? Color.accentColor : Color.primary.opacity(fillOpacity)))
-            ctx.stroke(path, with: .color(isSelected ? Color.accentColor : Color.primary.opacity(node.type == .file ? 0.9 : 0.4)), lineWidth: isSelected ? 2 : lineWidth)
-            if node.type == .file {
-                let fullTitle = node.displayLabel
-                let title = fullTitle.count > 24 ? String(fullTitle.prefix(21)) + "…" : fullTitle
-                ctx.draw(
-                    Text(title).font(.caption).foregroundStyle(.primary),
-                    at: CGPoint(x: screenPos.x, y: screenPos.y + radius + 12),
-                    anchor: .top
-                )
-            }
+    private func drawNodes(ctx: GraphicsContext, size: CGSize, phase: CGFloat) {
+        drawNodesData(ctx: ctx, size: size, phase: phase, nodes: nodes, nodePositions: nodePositions, revealPhase: revealPhase, selectedNodeId: selectedNodeId)
+    }
+
+    /// Cap nodes: at most maxMapNodes file nodes, then chunks (maxChunksPerFile per file) fill remaining slots; filter connections to kept nodes only.
+    private func capNodesAndConnections(nodes: [MemoryMapNode], connections: [MemoryMapConnection]) -> ([MemoryMapNode], [MemoryMapConnection]) {
+        let allFileNodes = nodes.filter { $0.type == .file }
+        let fileNodes = Array(allFileNodes.prefix(maxMapNodes))
+        let chunkNodes = nodes.filter { $0.type == .chunk }
+        let shownPathSet = Set(fileNodes.map(\.path))
+        let maxChunkSlots = max(0, maxMapNodes - fileNodes.count)
+        var perPathCount: [String: Int] = [:]
+        var cappedChunks: [MemoryMapNode] = []
+        for node in chunkNodes {
+            guard shownPathSet.contains(node.path) else { continue }
+            let key = node.path
+            let n = (perPathCount[key] ?? 0) + 1
+            if n > maxChunksPerFile || cappedChunks.count >= maxChunkSlots { continue }
+            perPathCount[key] = n
+            cappedChunks.append(node)
         }
+        let keptNodes = fileNodes + cappedChunks
+        let keptIds = Set(keptNodes.map(\.id))
+        let cappedConns = connections.filter { keptIds.contains($0.fromId) && keptIds.contains($0.toId) }
+        return (keptNodes, cappedConns)
+    }
+
+    /// Use cached map for current project if valid; otherwise load from node and cache result.
+    private func tryRestoreFromCacheOrLoad() {
+        let currentPath = effectiveProjectPath
+        let pathLabel = (currentPath as NSString).lastPathComponent
+        if let cache = viewModel.memoryMapCache {
+            let cacheLabel = (cache.projectPath as NSString).lastPathComponent
+            if cache.projectPath == currentPath, !cache.nodes.isEmpty {
+                memoryMapLog("restoreFromCache HIT path=\(pathLabel) cachePath=\(cacheLabel) nodes=\(cache.nodes.count)")
+                nodes = cache.nodes
+                connections = cache.connections
+                nodePositions = cache.nodePositions
+                isLoading = false
+                errorMessage = nil
+                layoutComplete = true
+                revealPhase = 2
+                return
+            }
+            memoryMapLog("restoreFromCache MISS path=\(pathLabel) cachePath=\(cacheLabel) (mismatch or empty) → load")
+        } else {
+            memoryMapLog("restoreFromCache MISS path=\(pathLabel) noCache → load")
+        }
+        loadConnections()
     }
 
     private func loadConnections() {
         isLoading = true
         errorMessage = nil
+        let currentPath = effectiveProjectPath
+        let pathLabel = (currentPath as NSString).lastPathComponent
+        guard !currentPath.isEmpty else {
+            memoryMapLog("loadConnections SKIP path=empty → no project set")
+            isLoading = false
+            errorMessage = "No project set. Select a project in the dashboard (or add one) and try again."
+            return
+        }
+        memoryMapLog("loadConnections START path=\(pathLabel)")
         Task {
-            let result = await nodeBridge.getAllConnections()
+            let result = await MemoryMapLoadSerializer.shared.runLoad(path: currentPath, nodeBridge: nodeBridge)
+            memoryMapLog("loadConnections got result for path=\(pathLabel)")
             switch result {
             case .success(let data):
-                let nodesToLayout = data.nodes
-                let connsToLayout = data.connections
+                let (nodesToLayout, connsToLayout) = capNodesAndConnections(nodes: data.nodes, connections: data.connections)
                 let positions = await Task.detached(priority: .userInitiated) {
                     MemoryMapLayout.run(
                         nodes: nodesToLayout,
@@ -337,11 +465,20 @@ struct MemoryMapView: View {
                     nodePositions = positions
                     isLoading = false
                     layoutComplete = true
+                    revealPhase = 2
+                    viewModel.memoryMapCache = MemoryMapCache(
+                        projectPath: currentPath,
+                        nodes: nodesToLayout,
+                        connections: connsToLayout,
+                        nodePositions: positions
+                    )
+                    memoryMapLog("loadConnections SUCCESS path=\(pathLabel) nodes=\(nodesToLayout.count) cached into viewModel")
                 }
             case .failure(let err):
                 await MainActor.run {
                     isLoading = false
                     errorMessage = err.localizedDescription
+                    memoryMapLog("loadConnections FAIL path=\(pathLabel) error=\(err.localizedDescription)")
                 }
             }
         }

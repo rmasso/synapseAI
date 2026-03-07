@@ -38,6 +38,8 @@ final class FolderService: ObservableObject {
     }
     /// Relative path of the optional extra index folder (e.g. ".Cursor"). nil when not set.
     @Published private(set) var additionalIndexFolderPath: String?
+    /// When true, Index All also indexes the full project (source files by extension), not just .synapse and indexFolders.
+    @Published private(set) var indexFullProject: Bool = false
     /// Last successful indexAll timestamp per project UUID.
     @Published private(set) var lastIndexTimes: [UUID: Date] = [:]
 
@@ -149,6 +151,7 @@ final class FolderService: ObservableObject {
         synapsePath = (project.path as NSString).appendingPathComponent(".synapse")
         createSynapseFolderIfNeeded(at: url.appendingPathComponent(".synapse", isDirectory: true))
         loadAdditionalIndexFolder()
+        loadIndexFullProject()
     }
 
     // MARK: - Persistence
@@ -235,31 +238,62 @@ final class FolderService: ObservableObject {
         additionalIndexFolderPath = readAdditionalIndexFolder()
     }
 
+    /// Load indexFullProject from .synapse/config.json (call when activating a project or after writing config).
+    func loadIndexFullProject() {
+        indexFullProject = readIndexFullProject()
+    }
+
     private func readAdditionalIndexFolder() -> String? {
-        guard let synapse = synapsePath else { return nil }
-        let configPath = (synapse as NSString).appendingPathComponent("config.json")
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let folders = json["indexFolders"] as? [String],
+        guard let config = readSynapseConfig() else { return nil }
+        guard let folders = config["indexFolders"] as? [String],
               let first = folders.first, !first.isEmpty
         else { return nil }
         return first
     }
 
-    @discardableResult
-    func writeAdditionalIndexFolder(_ rel: String?) -> Bool {
+    private func readIndexFullProject() -> Bool {
+        guard let config = readSynapseConfig() else { return false }
+        return (config["indexFullProject"] as? Bool) == true
+    }
+
+    /// Read full .synapse/config.json. Returns nil if file missing or invalid.
+    private func readSynapseConfig() -> [String: Any]? {
+        guard let synapse = synapsePath else { return nil }
+        let configPath = (synapse as NSString).appendingPathComponent("config.json")
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return json
+    }
+
+    /// Write config merging with existing keys so indexFolders and indexFullProject are preserved.
+    private func writeSynapseConfig(merging updates: [String: Any]) -> Bool {
         guard let synapse = synapsePath else { return false }
         let configPath = (synapse as NSString).appendingPathComponent("config.json")
-        let folders: [String] = rel.map { [$0] } ?? []
-        let dict: [String: Any] = ["indexFolders": folders]
+        var dict = readSynapseConfig() ?? [:]
+        for (k, v) in updates { dict[k] = v }
         guard let data = try? JSONSerialization.data(withJSONObject: dict, options: .prettyPrinted) else { return false }
         do {
             try data.write(to: URL(fileURLWithPath: configPath), options: .atomic)
-            additionalIndexFolderPath = rel
             return true
         } catch {
             return false
         }
+    }
+
+    @discardableResult
+    func writeAdditionalIndexFolder(_ rel: String?) -> Bool {
+        let folders: [String] = rel.map { [$0] } ?? []
+        guard writeSynapseConfig(merging: ["indexFolders": folders]) else { return false }
+        additionalIndexFolderPath = rel
+        return true
+    }
+
+    @discardableResult
+    func setIndexFullProject(_ value: Bool) -> Bool {
+        guard writeSynapseConfig(merging: ["indexFullProject": value]) else { return false }
+        indexFullProject = value
+        return true
     }
 
     @discardableResult

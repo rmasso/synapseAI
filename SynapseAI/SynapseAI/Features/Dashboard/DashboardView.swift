@@ -7,6 +7,37 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+// MARK: - Markdown text view (preview-optimized)
+
+private struct MarkdownTextView: View {
+    let text: String
+    var font: Font = .body
+    var lineSpacing: CGFloat = 4
+
+    private static let markdownOptions = AttributedString.MarkdownParsingOptions(
+        interpretedSyntax: .inlineOnlyPreservingWhitespace
+    )
+
+    var body: some View {
+        Group {
+            if let attr = try? AttributedString(markdown: text, options: Self.markdownOptions) {
+                Text(attr)
+            } else {
+                Text(text)
+            }
+        }
+        .font(font)
+        .lineSpacing(lineSpacing)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .textSelection(.enabled)
+    }
+}
+
+// MARK: - Debug (filter console with "[MemoryMap]")
+private func memoryMapTabLog(_ msg: String) {
+    print("[MemoryMap] \(msg)")
+}
+
 // MARK: - DashboardView (TabView shell)
 
 struct DashboardView: View {
@@ -19,31 +50,22 @@ struct DashboardView: View {
     @State private var addProjectSheetPath: String? = nil
     @State private var addProjectExtraFolderSuccess: String? = nil
     @State private var addProjectExtraFolderError: String? = nil
+    @State private var addProjectIndexAll = true
+    @State private var addProjectIndexComplete = false
+    @State private var isIndexing = false
+    @State private var isSelfSynapsing = false
+    @State private var selfSynapseSuccess: String?
+    @State private var selfSynapseError: String?
+    @State private var addProjectMemoryPromptCopied = false
+    @State private var showDeleteAlert = false
+    @State private var projectToDelete: SynapseProject? = nil
     @AppStorage("synapse.onboardingCompleted") private var onboardingCompleted = false
-
-    /// Sentinel UUID used as the tag for the "+" tab item. Never represents a real project.
-    private static let addTabSentinel = UUID()
+    @AppStorage("synapse.grokApiKey") private var grokApiKey = ""
 
     var body: some View {
-        TabView(selection: $selectedProjectId) {
-            ForEach(folderService.projects) { project in
-                ProjectDashboardContent(project: project)
-                    .tabItem {
-                        let stale = folderService.isIndexStale(for: project.id)
-                        Label(project.name, systemImage: stale ? "exclamationmark.triangle" : "folder")
-                    }
-                    .tag(project.id as UUID?)
-            }
-            // Shown when there are no projects yet (no-project onboarding state).
-            if folderService.projects.isEmpty {
-                ProjectDashboardContent(project: nil)
-                    .tabItem { Label("Synapse", systemImage: "brain.head.profile") }
-                    .tag(UUID?.none)
-            }
-            // "+" sentinel tab — tapping it shows the Add Project sheet; never navigated to.
-            Color.clear
-                .tabItem { Label("Add", systemImage: "plus") }
-                .tag(UUID?.some(Self.addTabSentinel))
+        VStack(spacing: 0) {
+            customTabBar
+            projectTabView
         }
         .frame(minWidth: 500, minHeight: 640)
         .onDisappear {
@@ -51,34 +73,189 @@ struct DashboardView: View {
         }
         .onAppear {
             selectedProjectId = folderService.activeProjectId
+            memoryMapTabLog("Dashboard onAppear selectedId=\(selectedProjectId?.uuidString ?? "nil") activeId=\(folderService.activeProjectId?.uuidString ?? "nil") projectPath=\((folderService.projectPath as NSString?)?.lastPathComponent ?? "nil")")
+            if folderService.projectPath != nil {
+                Task { _ = await nodeBridge.setProject(folderService.projectPath) }
+            }
         }
-        // When FolderService activates a project (e.g. after addProject), sync the tab selection.
         .onChange(of: folderService.activeProjectId) { _, newId in
             if selectedProjectId != newId {
                 selectedProjectId = newId
+                memoryMapTabLog("Dashboard sync from folderService activeId=\(newId?.uuidString ?? "nil") → selectedId=\(selectedProjectId?.uuidString ?? "nil")")
             }
-        }
-        // When the user picks a different tab, activate that project.
-        // Intercept the sentinel tab to show the Add Project sheet instead.
-        .onChange(of: selectedProjectId) { _, newId in
-            if newId == Self.addTabSentinel {
-                // Reset selection immediately — never actually navigate to the sentinel tab.
-                selectedProjectId = folderService.activeProjectId
-                addProjectSheetPath = nil
-                addProjectExtraFolderSuccess = nil
-                addProjectExtraFolderError = nil
-                showAddProjectSheet = true
-                return
-            }
-            guard let newId,
-                  let project = folderService.projects.first(where: { $0.id == newId }),
-                  folderService.activeProjectId != newId else { return }
-            folderService.activateProject(project)
-            Task { _ = await nodeBridge.setProject(project.path) }
         }
         .sheet(isPresented: $showAddProjectSheet) {
             addProjectSheet
         }
+        .alert("Delete Project?", isPresented: $showDeleteAlert) {
+            Button("Delete", role: .destructive) {
+                removeProjectToDelete()
+            }
+            Button("Cancel", role: .cancel) {
+                projectToDelete = nil
+                showDeleteAlert = false
+            }
+        } message: {
+            Text(projectToDelete.map { "This will remove the project '\($0.name)' from Synapse. The .synapse folder and database remain on disk. This action cannot be undone." } ?? "")
+        }
+    }
+
+    /// Shows only the selected project's content. On tab change the view is removed and recreated
+    /// so the memory map loads fresh for the new project.
+    @ViewBuilder
+    private var projectTabView: some View {
+        Group {
+            if folderService.projects.isEmpty {
+                ProjectDashboardContent(project: nil, isTabSelected: true)
+            } else {
+                ProjectDashboardContent(
+                    project: folderService.projects.first { $0.id == selectedProjectId } ?? folderService.projects.first!,
+                    isTabSelected: true
+                )
+                .id(selectedProjectId?.uuidString ?? "none")
+            }
+        }
+        .onChange(of: selectedProjectId) { oldId, newId in
+            memoryMapTabLog("Tab change old=\(oldId?.uuidString ?? "nil") new=\(newId?.uuidString ?? "nil")")
+            guard let newId,
+                  let project = folderService.projects.first(where: { $0.id == newId }),
+                  folderService.activeProjectId != newId else { return }
+            memoryMapTabLog("Activating project name=\(project.name) path=\((project.path as NSString).lastPathComponent)")
+            folderService.activateProject(project)
+            Task { _ = await nodeBridge.setProject(project.path) }
+        }
+    }
+
+    private func runSelfSynapseFromView() async {
+        selfSynapseError = nil
+        selfSynapseSuccess = nil
+        isSelfSynapsing = true
+        nodeBridge.clearSelfSynapseProgress()
+        defer { isSelfSynapsing = false }
+        switch await nodeBridge.selfSynapse(apiKey: grokApiKey) {
+        case .success(let out):
+            let count = out.filesUpdated.count
+            selfSynapseSuccess = "Updated \(count) file\(count == 1 ? "" : "s")"
+        case .failure(let err):
+            selfSynapseError = err.localizedDescription
+        }
+    }
+
+    private var customTabBar: some View {
+        VStack(spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 2) {
+                    if folderService.projects.isEmpty {
+                        tabPill(
+                            title: "Synapse",
+                            systemImage: "brain.head.profile",
+                            isSelected: true,
+                            showClose: false,
+                            onSelect: {},
+                            onClose: nil
+                        )
+                        tabPill(
+                            title: "Add",
+                            systemImage: "plus",
+                            isSelected: false,
+                            showClose: false,
+                            onSelect: { showAddProjectSheet = true },
+                            onClose: nil
+                        )
+                    } else {
+                        ForEach(folderService.projects) { project in
+                            let stale = folderService.isIndexStale(for: project.id)
+                            tabPill(
+                                title: project.name,
+                                systemImage: stale ? "exclamationmark.triangle" : "folder",
+                                isSelected: selectedProjectId == project.id,
+                                showClose: true,
+                                projectPath: project.path,
+                                onSelect: { selectedProjectId = project.id },
+                                onClose: {
+                                    projectToDelete = project
+                                    showDeleteAlert = true
+                                }
+                            )
+                        }
+                        tabPill(
+                            title: "Add",
+                            systemImage: "plus",
+                            isSelected: false,
+                            showClose: false,
+                            onSelect: { showAddProjectSheet = true },
+                            onClose: nil
+                        )
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+            }
+            .background(Color(NSColor.controlBackgroundColor))
+            Divider()
+        }
+    }
+
+    @ViewBuilder
+    private func tabPill(
+        title: String,
+        systemImage: String,
+        isSelected: Bool,
+        showClose: Bool,
+        projectPath: String? = nil,
+        onSelect: @escaping () -> Void,
+        onClose: (() -> Void)?
+    ) -> some View {
+        HStack(spacing: 4) {
+            if let path = projectPath {
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+                } label: {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(.plain)
+                .help("Show in Finder")
+            }
+            Button(action: onSelect) {
+                HStack(spacing: 4) {
+                    if projectPath == nil {
+                        Image(systemName: systemImage)
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    Text(title)
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .padding(.leading, projectPath == nil ? 10 : 2)
+                .padding(.trailing, showClose ? 2 : 10)
+                .padding(.vertical, 6)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if showClose, let onClose = onClose {
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Remove project from Synapse")
+            }
+        }
+        .background(isSelected ? Color(NSColor.selectedContentBackgroundColor) : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func removeProjectToDelete() {
+        guard let p = projectToDelete else { return }
+        folderService.removeProject(id: p.id)
+        Task { _ = await nodeBridge.setProject(folderService.projectPath) }
+        projectToDelete = nil
+        showDeleteAlert = false
     }
 
     // MARK: - Add Project sheet (DashboardView-level, no viewModel dependency)
@@ -145,6 +322,30 @@ struct DashboardView: View {
 
                     addSheetStep(
                         number: "2",
+                        systemImage: "doc.text.magnifyingglass",
+                        iconColor: .blue,
+                        title: "Project Type",
+                        description: "Is this a code project or a markdown folder? Synapse can index your full code for deeper agent context, or just .md files for pure knowledge bases.",
+                        isComplete: addProjectSheetPath != nil
+                    ) {
+                        Picker("Project Type", selection: Binding(
+                            get: { folderService.indexFullProject ? "code" : "md" },
+                            set: { newValue in
+                                _ = folderService.setIndexFullProject(newValue == "code")
+                            }
+                        )) {
+                            Text("Code Project (Full Index)").tag("code")
+                            Text("Knowledge Base (.md only)").tag("md")
+                        }
+                        .pickerStyle(.radioGroup)
+                        .horizontalRadioGroupLayout()
+                        .disabled(addProjectSheetPath == nil)
+                    }
+
+                    Divider().padding(.horizontal, 24)
+
+                    addSheetStep(
+                        number: "3",
                         systemImage: "folder.badge.plus",
                         iconColor: .purple,
                         title: "Add skills folder",
@@ -183,6 +384,112 @@ struct DashboardView: View {
                             Label(err, systemImage: "exclamationmark.circle.fill").font(.caption).foregroundStyle(.red)
                         }
                     }
+
+                    Divider().padding(.horizontal, 24)
+
+                    addSheetStep(
+                        number: "4",
+                        systemImage: "magnifyingglass",
+                        iconColor: .orange,
+                        title: "Index your memory",
+                        description: "Build the search index from your project. You must run this before using Self Synapse.",
+                        isComplete: addProjectIndexComplete
+                    ) {
+                        HStack(spacing: 10) {
+                            Button("Index All") {
+                                Task {
+                                    isIndexing = true
+                                    _ = await nodeBridge.indexAll()
+                                    if let pid = folderService.activeProjectId { folderService.recordIndexTime(for: pid) }
+                                    addProjectIndexComplete = true
+                                    isIndexing = false
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(addProjectSheetPath == nil || isIndexing)
+                            if isIndexing { ProgressView().scaleEffect(0.7) }
+                            if addProjectIndexComplete { Image(systemName: "checkmark").foregroundColor(.green) }
+                        }
+                    }
+
+                    Divider().padding(.horizontal, 24)
+
+                    addSheetStep(
+                        number: "5",
+                        systemImage: "brain",
+                        iconColor: .indigo,
+                        title: "Self Synapse (Optional)",
+                        description: "Let Grok automatically read your indexed files and write your initial project memory. Requires an API key and a built index.",
+                        isComplete: selfSynapseSuccess != nil
+                    ) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            if grokApiKey.isEmpty {
+                                SecureField("Paste Grok API key…", text: $grokApiKey)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(maxWidth: 300)
+                            }
+                            HStack {
+                                Button("Run Self Synapse") {
+                                    Task { await runSelfSynapseFromView() }
+                                }
+                                .buttonStyle(.bordered)
+                                .disabled(isSelfSynapsing || addProjectSheetPath == nil || grokApiKey.isEmpty || !addProjectIndexComplete)
+                                
+                                if isSelfSynapsing {
+                                    HStack(spacing: 6) {
+                                        ProgressView().scaleEffect(0.6).frame(width: 12, height: 12)
+                                        Text(nodeBridge.selfSynapseProgress ?? "Preparing...")
+                                            .font(.caption)
+                                            .foregroundStyle(.blue)
+                                            .contentTransition(.numericText())
+                                            .animation(.easeInOut(duration: 0.2), value: nodeBridge.selfSynapseProgress)
+                                    }
+                                }
+                            }
+                            if let msg = selfSynapseSuccess {
+                                Text(msg).font(.caption).foregroundStyle(.green)
+                            }
+                            if let err = selfSynapseError {
+                                Text(err).font(.caption).foregroundStyle(.red).lineLimit(2)
+                            }
+                        }
+                    }
+
+                    Divider().padding(.horizontal, 24)
+
+                    addSheetStep(
+                        number: "6",
+                        systemImage: "doc.on.clipboard",
+                        iconColor: .blue,
+                        title: "Remind Cursor to update memory",
+                        description: "Paste this into Cursor so the agent knows to refresh your memory files after setup.",
+                        isComplete: addProjectMemoryPromptCopied
+                    ) {
+                        HStack(spacing: 8) {
+                            Text("Update my .synapse memory folder (projectbrief, activeContext, progress, codebase).")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .lineLimit(2)
+                            Spacer(minLength: 8)
+                            Button {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString("Update my .synapse memory folder (projectbrief, activeContext, progress, codebase).", forType: .string)
+                                addProjectMemoryPromptCopied = true
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                                    addProjectMemoryPromptCopied = false
+                                }
+                            } label: {
+                                Image(systemName: addProjectMemoryPromptCopied ? "checkmark" : "doc.on.doc")
+                                    .foregroundStyle(addProjectMemoryPromptCopied ? .green : .secondary)
+                                    .scaleEffect(addProjectMemoryPromptCopied ? 1.1 : 1.0)
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                        .padding(8)
+                        .background(Color.primary.opacity(0.05))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
                 }
                 .padding(.vertical, 8)
             }
@@ -194,12 +501,6 @@ struct DashboardView: View {
                 AnimatedActionButton(action: {
                     onboardingCompleted = true
                     showAddProjectSheet = false
-                    if folderService.projectPath != nil {
-                        Task {
-                            _ = await nodeBridge.indexAll()
-                            if let pid = folderService.activeProjectId { folderService.recordIndexTime(for: pid) }
-                        }
-                    }
                 }, delayAction: true) { isSuccess in
                     HStack(spacing: 4) {
                         if isSuccess { Image(systemName: "checkmark").transition(.scale.combined(with: .opacity)) }
@@ -255,12 +556,154 @@ struct DashboardView: View {
     }
 }
 
+// MARK: - SplitHalfButtonStyle
+
+private struct SplitHalfButtonStyle: ButtonStyle {
+    let isDisabled: Bool
+    let isLeft: Bool
+    
+    @State private var isHovered = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(
+                Rectangle()
+                    .fill(Color.white.opacity(
+                        isDisabled ? 0 : (configuration.isPressed ? 0.2 : (isHovered ? 0.1 : 0))
+                    ))
+                    // When disabled, use a slightly darker hover state on the light background
+                    .overlay(
+                        Rectangle()
+                            .fill(Color.black.opacity(
+                                isDisabled && isHovered && !configuration.isPressed ? 0.05 : 0
+                            ))
+                    )
+            )
+            .clipShape(
+                .rect(
+                    topLeadingRadius: isLeft ? 18 : 0,
+                    bottomLeadingRadius: isLeft ? 18 : 0,
+                    bottomTrailingRadius: isLeft ? 0 : 18,
+                    topTrailingRadius: isLeft ? 0 : 18
+                )
+            )
+            .onHover { hovering in
+                withAnimation(.easeInOut(duration: 0.1)) {
+                    isHovered = hovering
+                }
+            }
+    }
+}
+
+// MARK: - SendMenuItemView
+
+private struct SendMenuItemView: View {
+    let mode: SendMenuMode
+    let isSelected: Bool
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .center, spacing: 12) {
+                Image(systemName: mode.iconName)
+                    .font(.system(size: 16, weight: .semibold))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+                    .frame(width: 24, alignment: .center)
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(mode.title)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Color.primary)
+                    Text(mode.subtitle)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.secondary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                }
+                
+                Spacer(minLength: 8)
+                
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(isHovered ? Color(NSColor.selectedControlColor).opacity(0.15) : Color.clear)
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovered = hovering
+            }
+        }
+    }
+}
+
+// MARK: - SendMenuMode
+
+private enum SendMenuMode: String, CaseIterable {
+    case prompt
+    case subagent
+    case chat
+
+    var iconName: String {
+        switch self {
+        case .prompt: return "paperplane.fill"
+        case .subagent: return "person.2.fill"
+        case .chat: return "bubble.left.and.bubble.right"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .prompt: return "Prompt"
+        case .subagent: return "Subagent"
+        case .chat: return "Chat"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .prompt: return "Skill-format prompt for Cursor"
+        case .subagent: return "Memory-heavy package for parallel agent"
+        case .chat: return "Natural chat — Grok can search your project"
+        }
+    }
+
+    var helpText: String {
+        switch self {
+        case .prompt: return "Send — skill-format prompt for Cursor"
+        case .subagent: return "Subagent context — memory-heavy package for parallel agent"
+        case .chat: return "Chat — natural conversation; Grok can search files and memory"
+        }
+    }
+
+    /// Next mode when cycling (prompt → subagent → chat → prompt).
+    var next: SendMenuMode {
+        let all = Self.allCases
+        let idx = all.firstIndex(of: self) ?? 0
+        return all[(idx + 1) % all.count]
+    }
+}
+
 // MARK: - ProjectDashboardContent
 
 /// Full per-project dashboard content. Each tab gets its own instance with an isolated DashboardViewModel.
 private struct ProjectDashboardContent: View {
     /// The project this content represents. nil = no project selected (onboarding state).
     let project: SynapseProject?
+    /// True when this tab is the selected one (visible in ZStack). Used for debug logging.
+    var isTabSelected: Bool = true
 
     @EnvironmentObject var nodeBridge: NodeBridgeService
     @EnvironmentObject var folderService: FolderService
@@ -275,12 +718,14 @@ private struct ProjectDashboardContent: View {
     @State private var isGrokApiExpanded = false
     @State private var showOnboardingSheet = false
     @State private var fullscreenMessage: ChatMessage? = nil
-    @State private var isShowingDeleteConfirmation: Bool = false
     @State private var isPromptCopied = false
     @State private var showMemoryMap = false
     @AppStorage("synapse.showMemoryMapInChat") private var showMemoryMapInChat = false
     /// Tick updated every 60 s so `isStale` re-evaluates without any user interaction.
     @State private var now = Date()
+    /// Send bar: selected mode (prompt / subagent / chat) and whether the mode menu is open.
+    @State private var sendMenuMode: SendMenuMode = .prompt
+    @State private var sendMenuPresented = false
 
     private static let cursorInstructionsPrompt = """
         This project uses a .synapse memory folder. Use it to keep and share context across sessions.
@@ -312,6 +757,10 @@ private struct ProjectDashboardContent: View {
             }
         }
         .onAppear {
+            if let p = project {
+                memoryMapTabLog("ProjectDashboardContent onAppear project=\(p.name) path=\((p.path as NSString).lastPathComponent) isTabSelected=\(isTabSelected) activeId=\(folderService.activeProjectId?.uuidString ?? "nil")")
+            }
+            // Only one content is shown at a time; always run full setup when this view appears.
             viewModel.clearChatHistory()
             viewModel.refresh(from: nodeBridge)
             viewModel.refreshFolderContent(folderService: folderService)
@@ -323,6 +772,7 @@ private struct ProjectDashboardContent: View {
         // Re-fresh when this tab's project is activated (user switches to this tab).
         .onChange(of: folderService.activeProjectId) { _, newActiveId in
             guard let project, newActiveId == project.id else { return }
+            memoryMapTabLog("ProjectDashboardContent ACTIVATED project=\(project.name) path=\((project.path as NSString).lastPathComponent)")
             viewModel.clearChatHistory()
             viewModel.refresh(from: nodeBridge)
             viewModel.refreshFolderContent(folderService: folderService)
@@ -348,7 +798,7 @@ private struct ProjectDashboardContent: View {
             onboardingSheet
         }
         .sheet(isPresented: $showMemoryMap) {
-            MemoryMapView(viewModel: viewModel)
+            MemoryMapView(viewModel: viewModel, projectPath: project?.path)
                 .environmentObject(nodeBridge)
                 .environmentObject(folderService)
         }
@@ -358,9 +808,21 @@ private struct ProjectDashboardContent: View {
         .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { date in
             now = date
         }
+        .onReceive(NotificationCenter.default.publisher(for: .cycleSendMode)) { _ in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                sendMenuMode = sendMenuMode.next
+            }
+        }
     }
 
     // MARK: - Stale index warning
+
+    private func chunkCountColor(_ delta: Int?) -> Color {
+        guard let d = delta else { return Color.primary.opacity(0.55) }
+        if d > 0 { return .green }
+        if d < 0 { return .red }
+        return Color.primary.opacity(0.55)
+    }
 
     private var isStale: Bool {
         _ = now  // force re-evaluation when timer ticks
@@ -432,12 +894,22 @@ private struct ProjectDashboardContent: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
-            if let stats = viewModel.dbStats {
+            if viewModel.isIndexing {
+                Text("·")
+                    .foregroundStyle(.tertiary)
+                ProgressView()
+                    .scaleEffect(0.6)
+                    .frame(width: 12, height: 12)
+                Text("Indexing…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if let stats = viewModel.dbStats {
                 Text("·")
                     .foregroundStyle(.tertiary)
                 Text("\(stats.chunkCount) chunks · \(formatByteCount(stats.dbSizeBytes))")
                     .font(.caption)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(chunkCountColor(viewModel.chunkCountDelta))
+                    .animation(.easeInOut(duration: 0.35), value: viewModel.chunkCountDelta)
             }
             Text("·")
                 .foregroundStyle(.tertiary)
@@ -456,24 +928,6 @@ private struct ProjectDashboardContent: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .tint(.accentColor)
-            }
-            if project != nil {
-                Button(action: { isShowingDeleteConfirmation = true }) {
-                    Label("Remove", systemImage: "trash")
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.red.opacity(0.8))
-                .alert(isPresented: $isShowingDeleteConfirmation) {
-                    let projectName = project?.name ?? "Unknown"
-                    return Alert(
-                        title: Text("Delete Project?"),
-                        message: Text("This will remove the project '\(projectName)' from Synapse. The .synapse folder and database remain on disk. This action cannot be undone."),
-                        primaryButton: .destructive(Text("Delete")) {
-                            removeCurrentProject()
-                        },
-                        secondaryButton: .cancel()
-                    )
-                }
             }
             Button("Index All") {
                 Task { await viewModel.indexAll(nodeBridge: nodeBridge, folderService: folderService, projectId: project?.id) }
@@ -501,13 +955,16 @@ private struct ProjectDashboardContent: View {
 
     private var chatArea: some View {
         ZStack(alignment: .topTrailing) {
-            if viewModel.isBuildingContext || viewModel.isBuildingSubagentContext || viewModel.isOptimizingPrompt {
-                // Large centered loading animation
+            if viewModel.isBuildingContext || viewModel.isBuildingSubagentContext || viewModel.isBuildingChat || viewModel.isOptimizingPrompt {
+                // Large centered loading animation (project-specific memory map when available)
                 VStack {
                     Spacer()
                     ProcessAnimationView(
                         isSubagent: viewModel.isBuildingSubagentContext,
-                        isOptimizing: viewModel.isOptimizingPrompt
+                        isChat: viewModel.isBuildingChat,
+                        isOptimizing: viewModel.isOptimizingPrompt,
+                        memoryMapCache: viewModel.memoryMapCache,
+                        projectPath: folderService.projectPath
                     )
                     Spacer()
                 }
@@ -515,8 +972,8 @@ private struct ProjectDashboardContent: View {
                 .transition(.opacity)
             } else {
                 Group {
-                    if viewModel.chatMessages.isEmpty, showMemoryMapInChat, folderService.projectPath != nil {
-                        MemoryMapView(viewModel: viewModel, embedInChat: true)
+                    if viewModel.chatMessages.isEmpty, showMemoryMapInChat, project?.path != nil {
+                        MemoryMapView(viewModel: viewModel, embedInChat: true, projectPath: project?.path, isTabSelected: isTabSelected)
                             .environmentObject(nodeBridge)
                             .environmentObject(folderService)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -566,7 +1023,7 @@ private struct ProjectDashboardContent: View {
                 }
             }
         }
-        .animation(.easeInOut(duration: 0.3), value: viewModel.isBuildingContext || viewModel.isBuildingSubagentContext || viewModel.isOptimizingPrompt)
+        .animation(.easeInOut(duration: 0.3), value: viewModel.isBuildingContext || viewModel.isBuildingSubagentContext || viewModel.isBuildingChat || viewModel.isOptimizingPrompt)
     }
 
     private var chatEmptyState: some View {
@@ -598,7 +1055,7 @@ private struct ProjectDashboardContent: View {
                 
                 VStack(alignment: .leading, spacing: 16) {
                     HStack(alignment: .top, spacing: 12) {
-                        Image(systemName: "arrow.up.circle.fill")
+                        Image(systemName: "paperplane.fill")
                             .font(.title2)
                             .foregroundStyle(Color.accentColor)
                             .frame(width: 24)
@@ -622,6 +1079,21 @@ private struct ProjectDashboardContent: View {
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(.primary)
                             Text("Builds a memory-heavy knowledge package to spin up a new parallel agent.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    
+                    HStack(alignment: .top, spacing: 12) {
+                        Image(systemName: "bubble.left.and.bubble.right")
+                            .font(.title2)
+                            .foregroundStyle(Color.blue)
+                            .frame(width: 24)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Chat")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.primary)
+                            Text("Natural conversation about your project; Grok can search files and memory as needed.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -656,8 +1128,7 @@ private struct ProjectDashboardContent: View {
         case .user:
             HStack {
                 Spacer(minLength: 80)
-                Text(msg.text)
-                    .font(.body)
+                MarkdownTextView(text: msg.text, font: .body, lineSpacing: 4)
                     .foregroundColor(.white)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 9)
@@ -686,12 +1157,10 @@ private struct ProjectDashboardContent: View {
                     .buttonStyle(.borderless)
                     .help("View full content")
                 }
-                Text(msg.text)
-                    .font(.system(.caption, design: .monospaced))
+                MarkdownTextView(text: msg.text, font: .caption, lineSpacing: 4)
                     .foregroundStyle(.primary)
                     .lineLimit(8)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
             }
             .padding(12)
             .background(Color(NSColor.controlBackgroundColor))
@@ -734,17 +1203,44 @@ private struct ProjectDashboardContent: View {
                     .help("View full content")
                     AnimatedCopyButton(textToCopy: msg.text, style: .prominent(nil))
                 }
-                Text(msg.text)
-                    .font(.system(.caption2, design: .monospaced))
+                MarkdownTextView(text: msg.text, font: .caption2, lineSpacing: 4)
                     .foregroundStyle(.secondary)
                     .lineLimit(7)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
             }
             .padding(12)
             .background(Color.accentColor.opacity(0.07))
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.accentColor.opacity(0.25), lineWidth: 1))
+            .padding(.horizontal, 14)
+
+        case .assistant(let inputTokens, let outputTokens):
+            HStack {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "bubble.left.and.bubble.right")
+                            .foregroundStyle(Color.blue)
+                            .font(.caption)
+                        Text("\(formattedTokens(inputTokens)) in / \(formattedTokens(outputTokens)) out")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button { fullscreenMessage = msg } label: {
+                            Image(systemName: "arrow.up.left.and.arrow.down.right").font(.caption)
+                        }
+                        .buttonStyle(.borderless)
+                        .help("View full content")
+                        AnimatedCopyButton(textToCopy: msg.text, style: .prominent(.blue))
+                    }
+                    MarkdownTextView(text: msg.text, font: .body, lineSpacing: 6)
+                        .foregroundStyle(.primary)
+                }
+                .padding(12)
+                .background(Color.blue.opacity(0.07))
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.blue.opacity(0.25), lineWidth: 1))
+                Spacer(minLength: 80)
+            }
             .padding(.horizontal, 14)
 
         case .subagentContext(let inputTokens, let outputTokens):
@@ -769,12 +1265,10 @@ private struct ProjectDashboardContent: View {
                     .help("View full content")
                     AnimatedCopyButton(textToCopy: msg.text, style: .prominent(.orange))
                 }
-                Text(msg.text)
-                    .font(.system(.caption2, design: .monospaced))
+                MarkdownTextView(text: msg.text, font: .caption2, lineSpacing: 4)
                     .foregroundStyle(.secondary)
                     .lineLimit(7)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
             }
             .padding(12)
             .background(Color.orange.opacity(0.07))
@@ -804,12 +1298,10 @@ private struct ProjectDashboardContent: View {
                     .controlSize(.small)
                     .tint(.purple)
                 }
-                Text(msg.text)
-                    .font(.system(.caption2, design: .monospaced))
+                MarkdownTextView(text: msg.text, font: .caption2, lineSpacing: 4)
                     .foregroundStyle(.secondary)
                     .lineLimit(5)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
             }
             .padding(12)
             .background(Color.purple.opacity(0.07))
@@ -879,8 +1371,9 @@ private struct ProjectDashboardContent: View {
                             guard !prompt.isEmpty,
                                   !viewModel.isBuildingContext,
                                   !viewModel.isBuildingSubagentContext,
+                                  !viewModel.isBuildingChat,
                                   !viewModel.isOptimizingPrompt else { return .handled }
-                            Task { await viewModel.buildContextForPrompt(apiKey: grokApiKey, nodeBridge: nodeBridge) }
+                            runSendAction(for: sendMenuMode)
                             return .handled
                         }
                 }
@@ -888,49 +1381,133 @@ private struct ProjectDashboardContent: View {
                 .background(Color(NSColor.textBackgroundColor))
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.secondary.opacity(0.2)))
-                Button {
-                    Task { await viewModel.buildContextForPrompt(apiKey: grokApiKey, nodeBridge: nodeBridge) }
-                } label: {
-                    Image(systemName: viewModel.isBuildingContext ? "ellipsis.circle" : "arrow.up.circle.fill")
-                        .font(.title2)
-                        .symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(
-                            viewModel.isBuildingContext || viewModel.promptForContext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                ? Color.secondary : Color.accentColor
-                        )
-                }
-                .buttonStyle(.plain)
-                .help("Send — skill-format prompt for Cursor")
-                .disabled(
-                    viewModel.isBuildingContext ||
-                    viewModel.isBuildingSubagentContext ||
-                    viewModel.isOptimizingPrompt ||
-                    viewModel.promptForContext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                )
-                Button {
-                    Task { await viewModel.buildSubagentContext(apiKey: grokApiKey, nodeBridge: nodeBridge) }
-                } label: {
-                    Image(systemName: viewModel.isBuildingSubagentContext ? "ellipsis.circle" : "person.2.fill")
-                        .font(.title3)
-                        .symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(
-                            viewModel.isBuildingSubagentContext || viewModel.promptForContext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                ? Color.secondary : Color.orange
-                        )
-                }
-                .buttonStyle(.plain)
-                .help("Subagent context — memory-heavy package for parallel agent")
-                .disabled(
-                    viewModel.isBuildingContext ||
-                    viewModel.isBuildingSubagentContext ||
-                    viewModel.isOptimizingPrompt ||
-                    viewModel.promptForContext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                )
+                sendButtonWithMenu
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
         }
         .background(Color(NSColor.windowBackgroundColor))
+    }
+
+    // MARK: - Send button with upward menu
+
+    private var sendButtonWithMenu: some View {
+        let isDisabled = viewModel.isBuildingContext ||
+            viewModel.isBuildingSubagentContext ||
+            viewModel.isBuildingChat ||
+            viewModel.isOptimizingPrompt ||
+            viewModel.promptForContext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        
+        let bgColor = isDisabled ? Color(NSColor.controlBackgroundColor) : modeColor
+        let fgColor = isDisabled ? Color.secondary : Color.white
+        let dividerColor = isDisabled ? Color.secondary.opacity(0.2) : Color.white.opacity(0.3)
+        
+        return ZStack(alignment: .bottomTrailing) {
+            // The actual button
+            HStack(spacing: 0) {
+                Button {
+                    runSendAction(for: sendMenuMode)
+                } label: {
+                    Image(systemName: sendButtonIcon)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(fgColor)
+                        .frame(width: 36, height: 36)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(SplitHalfButtonStyle(isDisabled: isDisabled, isLeft: true))
+                .help(sendMenuMode.helpText)
+                .disabled(isDisabled)
+
+                Rectangle()
+                    .fill(dividerColor)
+                    .frame(width: 1, height: 20)
+
+                Button {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.7, blendDuration: 0)) {
+                        sendMenuPresented.toggle()
+                    }
+                } label: {
+                    Image(systemName: "chevron.up")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(fgColor)
+                        .rotationEffect(.degrees(sendMenuPresented ? 180 : 0))
+                        .frame(width: 26, height: 36)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(SplitHalfButtonStyle(isDisabled: false, isLeft: false))
+                .help("Choose send mode: Prompt, Subagent, or Chat")
+            }
+            .background(
+                Capsule()
+                    .fill(bgColor)
+                    .shadow(color: isDisabled ? Color.clear : bgColor.opacity(0.3), radius: 4, x: 0, y: 2)
+            )
+            .overlay(
+                Capsule()
+                    .stroke(Color.secondary.opacity(0.2), lineWidth: isDisabled ? 1 : 0)
+            )
+            .animation(.easeInOut(duration: 0.2), value: isDisabled)
+            .animation(.easeInOut(duration: 0.2), value: sendMenuMode)
+            .padding(.trailing, 2)
+            
+            // Custom popup menu
+            if sendMenuPresented {
+                VStack(spacing: 4) {
+                    ForEach(SendMenuMode.allCases, id: \.rawValue) { mode in
+                        SendMenuItemView(
+                            mode: mode,
+                            isSelected: mode == sendMenuMode
+                        ) {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.7, blendDuration: 0)) {
+                                sendMenuMode = mode
+                                sendMenuPresented = false
+                            }
+                        }
+                    }
+                }
+                .padding(8)
+                .background(
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(.regularMaterial)
+                        .shadow(color: Color.black.opacity(0.15), radius: 10, x: 0, y: 5)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.secondary.opacity(0.2), lineWidth: 0.5)
+                        )
+                )
+                .frame(width: 240)
+                .offset(y: -44)
+                .transition(.scale(scale: 0.9, anchor: .bottomTrailing).combined(with: .opacity))
+                .zIndex(1)
+            }
+        }
+        .padding(.leading, 2)
+    }
+
+    private func runSendAction(for mode: SendMenuMode) {
+        switch mode {
+        case .prompt:
+            Task { await viewModel.buildContextForPrompt(apiKey: grokApiKey, nodeBridge: nodeBridge) }
+        case .subagent:
+            Task { await viewModel.buildSubagentContext(apiKey: grokApiKey, nodeBridge: nodeBridge) }
+        case .chat:
+            Task { await viewModel.sendChatMessage(apiKey: grokApiKey, nodeBridge: nodeBridge) }
+        }
+    }
+
+    private var sendButtonIcon: String {
+        if viewModel.isBuildingContext && sendMenuMode == .prompt { return "ellipsis.circle" }
+        if viewModel.isBuildingSubagentContext && sendMenuMode == .subagent { return "ellipsis.circle" }
+        if viewModel.isBuildingChat && sendMenuMode == .chat { return "ellipsis.circle" }
+        return sendMenuMode.iconName
+    }
+
+    private var modeColor: Color {
+        switch sendMenuMode {
+        case .prompt: return Color.accentColor
+        case .subagent: return Color.orange
+        case .chat: return Color.blue
+        }
     }
 
     // MARK: - Settings toggle bar
@@ -1015,12 +1592,24 @@ private struct ProjectDashboardContent: View {
                         }
                     }
                 }
-                if let stats = viewModel.dbStats {
+                if viewModel.isIndexing {
+                    HStack {
+                        Label("Memory", systemImage: "internaldrive")
+                        Spacer()
+                        ProgressView()
+                            .scaleEffect(0.7)
+                        Text("Indexing…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } else if let stats = viewModel.dbStats {
                     HStack {
                         Label("Memory", systemImage: "internaldrive")
                         Spacer()
                         Text("\(stats.documentCount) docs · \(stats.chunkCount) chunks · \(formatByteCount(stats.dbSizeBytes))")
-                            .font(.caption).foregroundStyle(.secondary)
+                            .font(.caption)
+                            .foregroundStyle(chunkCountColor(viewModel.chunkCountDelta))
+                            .animation(.easeInOut(duration: 0.35), value: viewModel.chunkCountDelta)
                     }
                 }
                 if let date = viewModel.lastInjectionDate {
@@ -1066,6 +1655,29 @@ private struct ProjectDashboardContent: View {
                     Text("Last: \((last as NSString).lastPathComponent)")
                         .font(.caption2).foregroundStyle(.tertiary)
                 }
+            }
+
+            Section("Full-project index") {
+                Toggle("Index full project", isOn: Binding(
+                    get: { folderService.indexFullProject },
+                    set: { newValue in
+                        _ = folderService.setIndexFullProject(newValue)
+                        if newValue {
+                            Task {
+                                await viewModel.indexAll(nodeBridge: nodeBridge, folderService: folderService, projectId: project?.id)
+                            }
+                        }
+                    }
+                ))
+                .font(.subheadline.weight(.medium))
+                if folderService.indexFullProject {
+                    Text("Full-project indexing includes all source files (Swift, JS, etc.) and can take several seconds and increase database size (e.g. 2–4 MB for small repos; more for large ones).")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                Text("When on, Index All runs automatically and indexes source files by extension (.swift, .js, .ts, .json, .md) outside .synapse. Configure in .synapse/config.json: indexFullProject, indexExtensions, indexDirs.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Additional index folder") {
@@ -1189,6 +1801,38 @@ private struct ProjectDashboardContent: View {
                         .frame(maxHeight: 120)
                         .background(Color.secondary.opacity(0.06))
                         .cornerRadius(6)
+                    }
+                }
+            }
+
+            Section("Self Synapse") {
+                Text("Send project context to Grok and fill out .synapse memory files. Works for code, design, docs, or any indexed folder. May take 30s–2min for large folders.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Button("Self Synapse") {
+                            Task { await viewModel.runSelfSynapse(apiKey: grokApiKey, nodeBridge: nodeBridge, folderService: folderService) }
+                        }
+                        .disabled(viewModel.isSelfSynapsing || folderService.projectPath == nil || grokApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        if let msg = viewModel.selfSynapseSuccess {
+                            Text(msg).font(.caption).foregroundStyle(.green)
+                        }
+                        if let err = viewModel.selfSynapseError {
+                            Text(err).font(.caption).foregroundStyle(.red).lineLimit(2)
+                        }
+                    }
+                    if viewModel.isSelfSynapsing {
+                        HStack(spacing: 6) {
+                            ProgressView().scaleEffect(0.6).frame(width: 12, height: 12)
+                            Text(nodeBridge.selfSynapseProgress ?? "Preparing...")
+                                .font(.caption)
+                                .foregroundStyle(.blue)
+                                .contentTransition(.numericText())
+                                .animation(.easeInOut(duration: 0.2), value: nodeBridge.selfSynapseProgress)
+                        }
+                        .padding(.top, 2)
+                        .padding(.leading, 2)
                     }
                 }
             }
@@ -1352,6 +1996,30 @@ private struct ProjectDashboardContent: View {
 
                     onboardingStep(
                         number: "2",
+                        icon: "doc.text.magnifyingglass",
+                        iconColor: .blue,
+                        title: "Project Type",
+                        description: "Is this a code project or a markdown folder? Synapse can index your full code for deeper agent context, or just .md files for pure knowledge bases.",
+                        isComplete: folderService.projectPath != nil
+                    ) {
+                        Picker("Project Type", selection: Binding(
+                            get: { folderService.indexFullProject ? "code" : "md" },
+                            set: { newValue in
+                                _ = folderService.setIndexFullProject(newValue == "code")
+                            }
+                        )) {
+                            Text("Code Project (Full Index)").tag("code")
+                            Text("Knowledge Base (.md only)").tag("md")
+                        }
+                        .pickerStyle(.radioGroup)
+                        .horizontalRadioGroupLayout()
+                        .disabled(folderService.projectPath == nil)
+                    }
+
+                    Divider().padding(.horizontal, 24)
+
+                    onboardingStep(
+                        number: "3",
                         icon: "folder.badge.plus",
                         iconColor: .purple,
                         title: "Add optional index folder",
@@ -1385,11 +2053,11 @@ private struct ProjectDashboardContent: View {
                     Divider().padding(.horizontal, 24)
 
                     onboardingStep(
-                        number: "3",
+                        number: "4",
                         icon: "arrow.triangle.2.circlepath.doc.on.clipboard",
                         iconColor: .teal,
                         title: "Index your memory",
-                        description: "Build the search index from .synapse (and the extra folder if set). Run Index All after adding or editing any memory files.",
+                        description: "Build the search index from your project. You must run this before using Self Synapse.",
                         isComplete: (viewModel.dbStats?.chunkCount ?? 0) > 0
                     ) {
                         HStack(spacing: 10) {
@@ -1399,7 +2067,8 @@ private struct ProjectDashboardContent: View {
                                 Label("Index All", systemImage: "arrow.triangle.2.circlepath")
                             }
                             .buttonStyle(.borderedProminent)
-                            .disabled(folderService.projectPath == nil)
+                            .disabled(folderService.projectPath == nil || viewModel.isIndexing)
+                            if viewModel.isIndexing { ProgressView().scaleEffect(0.7) }
                             if let count = viewModel.indexCount {
                                 Label("\(count) files indexed", systemImage: "checkmark.circle.fill")
                                     .font(.caption).foregroundStyle(.green)
@@ -1410,7 +2079,50 @@ private struct ProjectDashboardContent: View {
                     Divider().padding(.horizontal, 24)
 
                     onboardingStep(
-                        number: "4",
+                        number: "5",
+                        icon: "brain",
+                        iconColor: .indigo,
+                        title: "Self Synapse (Optional)",
+                        description: "Let Grok automatically read your indexed files and write your initial project memory. Requires an API key and a built index.",
+                        isComplete: viewModel.selfSynapseSuccess != nil
+                    ) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            if grokApiKey.isEmpty {
+                                SecureField("Paste Grok API key…", text: $grokApiKey)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(maxWidth: 300)
+                            }
+                            HStack {
+                                Button("Run Self Synapse") {
+                                    Task { await viewModel.runSelfSynapse(apiKey: grokApiKey, nodeBridge: nodeBridge, folderService: folderService) }
+                                }
+                                .buttonStyle(.bordered)
+                                .disabled(viewModel.isSelfSynapsing || folderService.projectPath == nil || grokApiKey.isEmpty || (viewModel.dbStats?.chunkCount ?? 0) == 0)
+                                
+                                if viewModel.isSelfSynapsing {
+                                    HStack(spacing: 6) {
+                                        ProgressView().scaleEffect(0.6).frame(width: 12, height: 12)
+                                        Text(nodeBridge.selfSynapseProgress ?? "Preparing...")
+                                            .font(.caption)
+                                            .foregroundStyle(.blue)
+                                            .contentTransition(.numericText())
+                                            .animation(.easeInOut(duration: 0.2), value: nodeBridge.selfSynapseProgress)
+                                    }
+                                }
+                            }
+                            if let msg = viewModel.selfSynapseSuccess {
+                                Text(msg).font(.caption).foregroundStyle(.green)
+                            }
+                            if let err = viewModel.selfSynapseError {
+                                Text(err).font(.caption).foregroundStyle(.red).lineLimit(2)
+                            }
+                        }
+                    }
+
+                    Divider().padding(.horizontal, 24)
+
+                    onboardingStep(
+                        number: "6",
                         icon: "key.horizontal",
                         iconColor: .orange,
                         title: "Grok API key (optional)",
@@ -1421,6 +2133,7 @@ private struct ProjectDashboardContent: View {
                             VStack(alignment: .leading, spacing: 6) {
                                 SecureField("Paste Grok API key…", text: $grokApiKey)
                                     .textFieldStyle(.roundedBorder)
+                                    .frame(maxWidth: 300)
                                 if !grokApiKey.isEmpty {
                                     Label("API key saved", systemImage: "checkmark.circle.fill")
                                         .font(.caption).foregroundStyle(.green)
@@ -1558,12 +2271,6 @@ private struct ProjectDashboardContent: View {
             await viewModel.refreshStats(nodeBridge: nodeBridge)
             viewModel.refreshFolderContent(folderService: folderService)
         }
-    }
-
-    private func removeCurrentProject() {
-        guard let id = project?.id ?? folderService.activeProjectId else { return }
-        folderService.removeProject(id: id)
-        Task { _ = await nodeBridge.setProject(folderService.projectPath) }
     }
 
     private func locateNodeScript() {
@@ -1733,17 +2440,28 @@ struct AnimatedActionButton<LabelView: View>: View {
 
 struct ProcessAnimationView: View {
     let isSubagent: Bool
+    var isChat: Bool = false
     let isOptimizing: Bool
-    
+    /// When set, the memory map animation uses this project's graph; view is keyed by projectPath so animation resets on tab change.
+    var memoryMapCache: MemoryMapCache? = nil
+    var projectPath: String? = nil
+
     @State private var stepIndex = 0
     let timer = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
     
-    private let nodeRadius: CGFloat = 8
-    private let stepSpacing: CGFloat = 56
-    private let connectionLineWidth: CGFloat = 3
+    /// Animation limits: max chunks per file and max total nodes (for any future chunk-driven steps).
+    private let maxChunksPerFileAnimation = 5
+    private let maxAnimationNodes = 700
     
     private var steps: [(icon: String, text: String, color: Color)] {
-        if isSubagent {
+        if isChat {
+            return [
+                ("brain.head.profile", "Reading project memory...", .blue),
+                ("bubble.left.and.bubble.right", "Chatting with Grok...", .blue),
+                ("doc.text.magnifyingglass", "Searching codebase when needed...", .blue),
+                ("sparkles", "Preparing reply...", .blue)
+            ]
+        } else if isSubagent {
             return [
                 ("brain.head.profile", "Loading full project memory...", .orange),
                 ("doc.text.magnifyingglass", "Scanning codebase context...", .orange),
@@ -1770,58 +2488,17 @@ struct ProcessAnimationView: View {
     
     
     var body: some View {
-        let currentStep = steps[stepIndex % steps.count]
-        let activeIndex = stepIndex % steps.count
-        let resolvedSteps = steps  // capture concrete array with resolved colors
-        let stepCount = resolvedSteps.count
-        let spacing = stepSpacing
-        let radius = nodeRadius
-        let lineWidth = connectionLineWidth
+        let resolvedSteps = Array(steps.prefix(maxAnimationNodes))
+        let currentStep = resolvedSteps.isEmpty ? steps[0] : resolvedSteps[stepIndex % resolvedSteps.count]
         
         VStack(spacing: 16) {
-            // Step nodes + connections drawn via Canvas so Path strokes are visible
-            Canvas { ctx, size in
-                let centerY = size.height / 2
-                let totalWidth = size.width
-                let totalSpan = CGFloat(stepCount - 1) * spacing
-                let startX = (totalWidth - totalSpan) / 2
-
-                func cx(_ i: Int) -> CGFloat { startX + CGFloat(i) * spacing }
-
-                // Draw connections first (behind nodes)
-                for index in 1..<stepCount {
-                    var path = Path()
-                    path.move(to: CGPoint(x: cx(index - 1), y: centerY))
-                    path.addLine(to: CGPoint(x: cx(index), y: centerY))
-                    ctx.stroke(
-                        path,
-                        with: .color(Color.white.opacity(0.4)),
-                        style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
-                    )
-                }
-
-                // Draw nodes on top
-                for index in 0..<stepCount {
-                    let isActive = index == activeIndex
-                    let stepColor = resolvedSteps[index].color
-                    let rect = CGRect(
-                        x: cx(index) - radius,
-                        y: centerY - radius,
-                        width: radius * 2,
-                        height: radius * 2
-                    )
-                    var circle = Path()
-                    circle.addEllipse(in: rect)
-                    ctx.fill(circle, with: .color(isActive ? stepColor : stepColor.opacity(0.3)))
-                    ctx.stroke(circle, with: .color(stepColor.opacity(isActive ? 1.0 : 0.4)), lineWidth: isActive ? 2 : 1)
-                }
-            }
-            .frame(height: 48)
+            MemoryMapAnimationView(
+                color: currentStep.color,
+                memoryMapCache: memoryMapCache,
+                projectPath: projectPath
+            )
+            .frame(maxHeight: .infinity)
             .padding(.horizontal, 24)
-            
-            ProgressView()
-                .scaleEffect(1.2)
-                .padding(.bottom, 4)
             
             HStack(spacing: 8) {
                 Image(systemName: currentStep.icon)
@@ -1856,6 +2533,218 @@ struct ProcessAnimationView: View {
     }
 }
 
+// MARK: - Memory Map Animation View
+
+/// Canvas size used by MemoryMapLayout; used to normalize cached positions to 0–1.
+private let memoryMapAnimationCanvasSize: CGFloat = 800
+
+struct MemoryMapAnimationView: View {
+    let color: Color
+    /// When set and matching projectPath, the animation reveals this project's memory graph instead of random nodes.
+    var memoryMapCache: MemoryMapCache? = nil
+    var projectPath: String? = nil
+
+    struct MapNode: Identifiable {
+        let id: UUID
+        let position: CGPoint
+        var appearTime: TimeInterval
+        var disappearTime: TimeInterval? = nil
+
+        init(position: CGPoint, appearTime: TimeInterval, disappearTime: TimeInterval? = nil, id: UUID = UUID()) {
+            self.id = id
+            self.position = position
+            self.appearTime = appearTime
+            self.disappearTime = disappearTime
+        }
+    }
+
+    struct MapEdge: Identifiable {
+        let id = UUID()
+        let from: UUID
+        let to: UUID
+        var appearTime: TimeInterval
+        var disappearTime: TimeInterval? = nil
+    }
+
+    @State private var nodes: [MapNode] = []
+    @State private var edges: [MapEdge] = []
+    @State private var startTime: TimeInterval = 0
+    /// Project-driven reveal: nodes/edges built from cache, revealed over time.
+    @State private var pendingProjectNodes: [MapNode] = []
+    @State private var pendingProjectEdges: [(from: UUID, to: UUID)] = []
+
+    let timer = Timer.publish(every: 0.2, on: .main, in: .common).autoconnect()
+
+    private var useProjectData: Bool {
+        guard let cache = memoryMapCache, let path = projectPath, cache.projectPath == path, !cache.nodes.isEmpty else { return false }
+        return true
+    }
+
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            Canvas { ctx, size in
+                let now = timeline.date.timeIntervalSinceReferenceDate
+                let elapsed = max(0, now - (startTime == 0 ? now : startTime))
+                let progress = min(1.0, elapsed / 20.0)
+                
+                // Draw edges
+                for edge in edges {
+                    let age = now - edge.appearTime
+                    if age > 0 {
+                        var alpha = min(1.0, age / 0.4)
+                        if let dTime = edge.disappearTime {
+                            let dAge = now - dTime
+                            if dAge > 0 {
+                                alpha = max(0.0, 1.0 - (dAge / 0.5))
+                            }
+                        }
+                        
+                        if alpha > 0,
+                           let fromNode = nodes.first(where: { $0.id == edge.from }),
+                           let toNode = nodes.first(where: { $0.id == edge.to }) {
+                            
+                            let p1 = CGPoint(x: fromNode.position.x * size.width, y: fromNode.position.y * size.height)
+                            let p2 = CGPoint(x: toNode.position.x * size.width, y: toNode.position.y * size.height)
+                            
+                            var path = Path()
+                            path.move(to: p1)
+                            path.addLine(to: p2)
+                            
+                            ctx.stroke(path, with: .color(Color.white.opacity(0.3 * alpha)), lineWidth: 1.5)
+                        }
+                    }
+                }
+                
+                // Draw nodes
+                for node in nodes {
+                    let age = now - node.appearTime
+                    if age > 0 {
+                        var alpha = min(1.0, age / 0.3)
+                        if let dTime = node.disappearTime {
+                            let dAge = now - dTime
+                            if dAge > 0 {
+                                alpha = max(0.0, 1.0 - (dAge / 0.4))
+                            }
+                        }
+                        
+                        if alpha > 0 {
+                            let p = CGPoint(x: node.position.x * size.width, y: node.position.y * size.height)
+                            let radius: CGFloat = 12
+                            
+                            let pulseAmplitude = 0.15 * (1.0 - progress)
+                            let pulse = 1.0 + pulseAmplitude * sin(age * 3)
+                            
+                            let scaleRect = CGRect(
+                                x: p.x - radius * pulse,
+                                y: p.y - radius * pulse,
+                                width: radius * 2 * pulse,
+                                height: radius * 2 * pulse
+                            )
+                            
+                            var path = Path()
+                            path.addEllipse(in: scaleRect)
+                            ctx.fill(path, with: .color(Color.white.opacity(alpha)))
+                        }
+                    }
+                }
+            }
+        }
+        .onAppear {
+            startTime = Date().timeIntervalSinceReferenceDate
+            if useProjectData, let cache = memoryMapCache {
+                let cs = memoryMapAnimationCanvasSize
+                var idByNodeId: [String: UUID] = [:]
+                var pendingNodes: [MapNode] = []
+                for node in cache.nodes {
+                    let raw = cache.nodePositions[node.id] ?? CGPoint(x: cs / 2, y: cs / 2)
+                    let nx = max(0.05, min(0.95, raw.x / cs))
+                    let ny = max(0.05, min(0.95, raw.y / cs))
+                    let uuid = UUID()
+                    idByNodeId[node.id] = uuid
+                    pendingNodes.append(MapNode(position: CGPoint(x: nx, y: ny), appearTime: 0, id: uuid))
+                }
+                pendingProjectNodes = pendingNodes.shuffled()
+                let visibleIds = Set(idByNodeId.values)
+                pendingProjectEdges = cache.connections.compactMap { conn -> (UUID, UUID)? in
+                    guard let fromU = idByNodeId[conn.fromId], let toU = idByNodeId[conn.toId], fromU != toU, visibleIds.contains(fromU), visibleIds.contains(toU) else { return nil }
+                    return (fromU, toU)
+                }
+            }
+        }
+        .onReceive(timer) { date in
+            let now = date.timeIntervalSinceReferenceDate
+            let elapsed = max(0, now - (startTime == 0 ? now : startTime))
+            let progress = min(1.0, elapsed / 20.0)
+            let isStable = progress >= 1.0
+
+            // Clean up fully disappeared elements
+            nodes.removeAll { $0.disappearTime != nil && (now - $0.disappearTime!) > 0.5 }
+            edges.removeAll { $0.disappearTime != nil && (now - $0.disappearTime!) > 0.5 }
+
+            if useProjectData && !pendingProjectNodes.isEmpty {
+                // Reveal project graph: add a few nodes per tick, then edges between visible nodes
+                let toReveal = min(2, pendingProjectNodes.count)
+                for _ in 0..<toReveal {
+                    guard !pendingProjectNodes.isEmpty else { break }
+                    var n = pendingProjectNodes.removeFirst()
+                    n.appearTime = now
+                    nodes.append(n)
+                }
+                let visibleIds = Set(nodes.filter { $0.disappearTime == nil }.map(\.id))
+                let maxEdgesToAdd = 4
+                var added = 0
+                while added < maxEdgesToAdd, let idx = pendingProjectEdges.firstIndex(where: { visibleIds.contains($0.from) && visibleIds.contains($0.to) }) {
+                    let e = pendingProjectEdges.remove(at: idx)
+                    edges.append(MapEdge(from: e.from, to: e.to, appearTime: now + 0.05))
+                    added += 1
+                }
+            } else if !useProjectData {
+                // Add new node. Capacity grows from 30 up to 100 as memory stabilizes
+                let maxNodes = Int(30 + (progress * 70))
+
+                if nodes.filter({ $0.disappearTime == nil }).count < maxNodes {
+                    let newNode = MapNode(
+                        position: CGPoint(
+                            x: CGFloat.random(in: 0.05...0.95),
+                            y: CGFloat.random(in: 0.05...0.95)
+                        ),
+                        appearTime: now
+                    )
+
+                    let activeNodes = nodes.filter { $0.disappearTime == nil }
+                    if !activeNodes.isEmpty {
+                        let sortedNodes = activeNodes.sorted { n1, n2 in
+                            let d1 = pow(n1.position.x - newNode.position.x, 2) + pow(n1.position.y - newNode.position.y, 2)
+                            let d2 = pow(n2.position.x - newNode.position.x, 2) + pow(n2.position.y - newNode.position.y, 2)
+                            return d1 < d2
+                        }
+
+                        let connections = Int.random(in: 1...min(3, activeNodes.count))
+                        for i in 0..<connections {
+                            edges.append(MapEdge(from: newNode.id, to: sortedNodes[i].id, appearTime: now + 0.1))
+                        }
+                    }
+
+                    nodes.append(newNode)
+                } else if !isStable {
+                    // Trigger disappear for oldest node to create chaos/churn, stops when stable
+                    if Double.random(in: 0...1) > 0.3 {
+                        if let oldestIdx = nodes.firstIndex(where: { $0.disappearTime == nil }) {
+                            nodes[oldestIdx].disappearTime = now
+                            let oldId = nodes[oldestIdx].id
+                            for eIdx in edges.indices {
+                                if edges[eIdx].disappearTime == nil && (edges[eIdx].from == oldId || edges[eIdx].to == oldId) {
+                                    edges[eIdx].disappearTime = now
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Fullscreen message sheet
 
 private struct FullscreenMessageSheet: View {
@@ -1869,6 +2758,7 @@ private struct FullscreenMessageSheet: View {
             return "\((path as NSString).lastPathComponent)  ·  L\(startLine)–\(endLine)"
         case .block: return "Skill prompt"
         case .subagentContext: return "Subagent context"
+        case .assistant: return "Chat reply"
         case .optimized: return "Refined prompt"
         case .error: return "Error"
         }
@@ -1900,12 +2790,12 @@ private struct FullscreenMessageSheet: View {
             .padding(.vertical, 12)
             Divider()
             ScrollView(.vertical, showsIndicators: true) {
-                Text(message.text)
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(.primary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-                    .padding(16)
+                Group {
+                    MarkdownTextView(text: message.text, font: .body, lineSpacing: 6)
+                        .foregroundStyle(.primary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(16)
             }
         }
         .frame(minWidth: 520, minHeight: 400)

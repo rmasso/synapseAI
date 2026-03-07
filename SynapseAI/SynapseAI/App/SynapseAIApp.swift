@@ -6,14 +6,42 @@
 import SwiftUI
 import AppKit
 
+extension Notification.Name {
+    static let cycleSendMode = Notification.Name("cycleSendMode")
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var shiftTabMonitor: Any?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Bring app to front so the Dashboard window (opened by WindowGroup-first) is visible.
         NSApp.activate(ignoringOtherApps: true)
+        installShiftTabMonitor()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        removeShiftTabMonitor()
         HotkeyService.shared.unregister()
+    }
+
+    private func installShiftTabMonitor() {
+        shiftTabMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            let isTab = event.keyCode == 48
+            let hasShift = event.modifierFlags.contains(.shift)
+            guard isTab, hasShift else { return event }
+            guard NSApp.keyWindow?.title == "Dashboard" else { return event }
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .cycleSendMode, object: nil)
+            }
+            return nil
+        }
+    }
+
+    private func removeShiftTabMonitor() {
+        if let m = shiftTabMonitor {
+            NSEvent.removeMonitor(m)
+            shiftTabMonitor = nil
+        }
     }
 }
 

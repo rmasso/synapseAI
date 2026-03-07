@@ -134,6 +134,16 @@ function getChunkDescriptions() {
   }));
 }
 
+/** Returns chunks in batches for pagination. Order: id. */
+function getChunksBatch(limit, offset) {
+  if (!db) return [];
+  const l = Math.max(0, Number(limit) || 100);
+  const o = Math.max(0, Number(offset) || 0);
+  return db.prepare(
+    "SELECT id, file_path, start_line, end_line, content FROM chunks ORDER BY id LIMIT ? OFFSET ?"
+  ).all(l, o);
+}
+
 /** Returns full chunks for given ids (order preserved). */
 function getChunksById(ids) {
   if (!db || !ids || ids.length === 0) return [];
@@ -157,24 +167,43 @@ function getChunksForConnections() {
   return db.prepare("SELECT document_id, file_path, content FROM chunks").all();
 }
 
+/** Max chunk nodes per file in memory map (animation limit). */
+const MAX_CHUNKS_PER_FILE_MAP = 5;
+/** Max total nodes (files + chunks) in memory map; keeps display readable. */
+const MAX_MAP_NODES = 250;
+/** Reserve slots for chunks so file→chunk lines can draw when there are many files. */
+const MIN_CHUNK_SLOTS = 20;
+
 /**
  * Derive connections from chunk content (markdown links, @file refs).
  * Returns { nodes: [{ id, path, type, documentPath? }], connections: [{ fromId, toId, type, label }] }.
  * type: "file" | "chunk". Chunks have documentPath. No schema change.
+ * Capped: at most MAX_MAP_NODES file nodes shown, then chunks (5 per file) fill remaining slots up to MAX_MAP_NODES total.
  */
 function getAllConnections() {
   const docs = getAllDocuments();
-  const docPaths = new Set(docs.map((d) => d.path));
   const connections = [];
   const seen = new Set();
 
-  const fileNodes = docs.map((d) => ({ id: d.path, path: d.path, type: "file", documentPath: null }));
+  const maxFileNodes = Math.max(1, MAX_MAP_NODES - MIN_CHUNK_SLOTS);
+  const shownPaths = docs.slice(0, maxFileNodes).map((d) => d.path);
+  const docPaths = new Set(shownPaths);
+  const fileNodes = shownPaths.map((p) => ({ id: p, path: p, type: "file", documentPath: null }));
+  const maxChunkNodes = Math.max(0, MAX_MAP_NODES - fileNodes.length);
 
-  const MAX_CHUNKS = 150;
-  const chunkRows = db.prepare(
-    "SELECT id, document_id, file_path, content FROM chunks ORDER BY id LIMIT ?"
-  ).all(MAX_CHUNKS);
-  const docIdToPath = new Map(docs.map((d) => [d.id, d.path]));
+  let chunkRows = [];
+  if (maxChunkNodes > 0 && shownPaths.length > 0 && db) {
+    const placeholders = shownPaths.map(() => "?").join(",");
+    chunkRows = db.prepare(
+      `WITH ranked AS (
+        SELECT id, document_id, file_path, content,
+               ROW_NUMBER() OVER (PARTITION BY file_path ORDER BY id) AS rn
+        FROM chunks
+        WHERE file_path IN (${placeholders})
+      )
+      SELECT id, document_id, file_path, content FROM ranked WHERE rn <= ? ORDER BY id LIMIT ?`
+    ).all(...shownPaths, MAX_CHUNKS_PER_FILE_MAP, maxChunkNodes);
+  }
   const chunkNodes = chunkRows.map((r) => ({
     id: "chunk-" + r.id,
     path: r.file_path,
@@ -220,4 +249,4 @@ function getAllConnections() {
   };
 }
 
-module.exports = { open, getDb, getDbPath, close, upsertDocument, initSchema, getStats, getChunkDescriptions, getChunksById, getAllDocuments, getAllConnections };
+module.exports = { open, getDb, getDbPath, close, upsertDocument, initSchema, getStats, getChunkDescriptions, getChunksBatch, getChunksById, getAllDocuments, getAllConnections };

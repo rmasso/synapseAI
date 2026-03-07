@@ -12,7 +12,7 @@
 - **MVVM** – Swift: Views → ViewModels → Services (NodeBridge, Folder, Accessibility, Hotkey).
 - **Node bridge** – JSON-RPC over stdio; one Node process per app lifecycle; script path via Working Directory or `SYNAPSE_NODE_SCRIPT`.
 - **Swift ↔ Node** – Single process; request/response by `id`; notifications (e.g. fileChanged) no `id`. Chunking ~1200 chars; FTS5 + bm25 search; Dashboard reuses one window (title "Dashboard").
-- **Grok selection** – MAX_CHUNKS_FOR_PROMPT user-configurable (default 5, slider 1–10 in Dashboard); strict relevance rules; AVG_TOKENS_PER_CHUNK = 300; reply max_tokens = 512.
+- **Grok selection** – MAX_CHUNKS_FOR_PROMPT user-configurable (default 10, slider 1–10 in Dashboard); include every directly relevant chunk so the skill is self-contained for the executing agent; AVG_TOKENS_PER_CHUNK = 300; reply max_tokens = 512.
 
 ## Open Questions
 - Cursor Composer AX element stability across Cursor updates (kAXSelectedTextAttribute may also break on Electron updates).
@@ -21,17 +21,38 @@
 
 ## Recent Changes
 
+### Chat mode (Mar 2026)
+- **Chat mode implemented:** Select Chat in send menu → natural multi-turn conversation. Grok receives full chat history + .synapse memory; can call `search_project` tool to fetch DB snippets during conversation. Node: `grok.chatTurn(apiKey, projectRoot, messages)` with tools support in `chatCompletion`; `chatTurn` RPC in index.js. Swift: `ChatMessage.Kind.assistant`, `sendChatMessage`, `NodeBridgeService.chatTurn`. Menu description: "Natural chat — Grok can search your project". ProcessAnimationView shows chat-specific steps.
+- **xAI tool format:** API requires nested `function` object; `SEARCH_PROJECT_TOOL` uses `{ type: "function", function: { name, description, parameters } }`. skill-function-calling.md updated.
+- **Chat markdown preview:** `MarkdownTextView` renders user and assistant bubbles via `AttributedString(markdown:)`; FullscreenMessageSheet uses markdown for .user/.assistant.
+
+### Dashboard send menu (Mar 2026)
+- **Single send button + mode menu:** Replaced separate "prompt" and "subagent" send buttons with one control: main button (shows current mode icon; default **prompt** when closed) + chevron that opens an **upward** custom menu. Menu lists Prompt, Subagent, Chat — each with icon, title, and description; selection sets mode and closes menu; main button sends using selected mode. Same actions: `buildContextForPrompt` (prompt), `buildSubagentContext` (subagent), `sendChatMessage` (chat).
+- **SendMenuMode enum:** `SendMenuMode` (prompt, subagent, chat) with `iconName`, `title`, `subtitle`, `helpText`. State: `sendMenuMode`, `sendMenuPresented` in `ProjectDashboardContent`. Prompt icon: `paperplane.fill` (bolder).
+- **Modernized UI:** Custom overlay (ZStack + `.regularMaterial`) instead of system popover; spring open/close animation; chevron rotates 180° when open; `SendMenuItemView` with hover highlight (`.onHover`), bold titles, accent checkmark for selected mode. Same disabled condition and help texts as before.
+
+### Skill prompt improvements (Mar 2026)
+- **Type-name surfacing:** When the user prompt mentions a PascalCase type (e.g. `ProjectDashboardContent`, `DashboardView`, *View, *Content, *Service, *ViewModel), the pipeline runs a search for that name and prepends matching chunks to the candidate list so the generated skill can include code from that type. Implemented in `node/index.js` via `extractTypeNamesFromPrompt()`; applied in both `buildContextForPrompt` and `buildContextForPromptV2`.
+- **buildSkillFormatPrompt output rules:** (1) `max_tokens` 3072 so ## Examples and ## Instructions are not cut. (2) Instructions use numbered steps (1. 2. 3.). (3) Mixed-snippet clarification in label when one block contains alert + toolbar. (4) One line for existing behavior to preserve when relevant. (5) Examples complete (no mid-line cut). Skill length 2500–4000 chars so the executing agent gets a complete, self-contained prompt.
+- **Optimize for the executing agent, not Grok:** Default max chunks 5 → 10; selection rules reframed to "include every directly relevant chunk so the skill is self-contained" (no "aim for 1–3" or "when in doubt exclude"). DB snippets sent to Grok 6000 → 12000 chars, memory 3000 → 6000. Goal: best possible skill so the next agent (e.g. in Cursor) saves context/tokens by not reading files.
+- **Final step: Update .synapse:** Every generated skill and subagent context must end with a final instruction: "Update .synapse: add a brief entry to activeContext.md or progress.md (and optionally thoughts.md) reflecting what was done, so the next session and ⌘⇧P have up-to-date context." Enforced in `buildSkillFormatPrompt` and `buildSubagentContext` (node/grok.js).
+
+### Memory map limits + persistent UI (Mar 2026)
+- **Node limits:** Memory map capped at **250 total nodes** (files + chunks). Backend: `node/db.js` — `MAX_MAP_NODES = 250`, `MIN_CHUNK_SLOTS = 20`; at most 230 file nodes, then chunks (5 per file) fill remaining slots; chunks only from shown files (`WHERE file_path IN (shownPaths)`). Swift `MemoryMapView`: `maxMapNodes = 250`; `capNodesAndConnections` caps file nodes and chunks client-side.
+- **Line drawing:** `revealPhase = 2` set immediately when layout completes (so connection lines draw without waiting on `.task`); `.task(id: layoutComplete)` no longer resets to phase 1 when cache already set.
+- **Persistent map:** `DashboardViewModel.memoryMapCache: MemoryMapCache?` (projectPath, nodes, connections, nodePositions). `MemoryMapView` uses `tryRestoreFromCacheOrLoad()` on appear: if cache exists for current project and has nodes, restore from cache (no refetch/relayout); otherwise `loadConnections()` and save to cache. Cache cleared on `indexAll` success so next map open gets fresh data. Avoids re-render when switching tabs, chat view, or opening/closing the map sheet.
+
 ### Dashboard UX polish (Mar 2026)
 - **ProcessAnimationView:** Full-screen centered loading animation during API calls; clears chat area and shows large, prominent step-by-step process (memory search, codebase scan, skill checks, etc.). Cycles every 1.5 s with distinct steps for buildContext, subagent, and optimizePrompt flows.
 - **Chat only user + final:** After API response, chat shows only the user's original prompt and the final result (skill block, subagent context, or optimized prompt). FTS hit bubbles no longer added; `buildContextForPrompt` skips appending hits. `optimizePrompt` on success clears chat and shows [user, optimized].
 - **Button feedback:** `AnimatedCopyButton` and `AnimatedActionButton` — Copy/Done/Paste/Clear show "Copied", checkmark, etc. with spring animations.
 - **Delete confirmation:** Remove button shows `.alert` "Delete Project?" with destructive/cancel before `removeProject`.
 - **Add project flow:** + icon as sentinel tab (right of project tabs); 2-step `addProjectSheet` (project folder + skills folder); Done triggers Index All.
-- **Chat empty state marketing:** When project set, shows feature descriptions with icons: Generate Skill Prompt (arrow.up), Subagent Context (person.2), Refine Prompt (wand.and.stars + Shift+Return).
+- **Chat empty state marketing:** When project set, shows feature descriptions with icons: Generate Skill Prompt (paperplane.fill), Subagent Context (person.2), Chat (bubble.left.and.bubble.right), Refine Prompt (wand.and.stars + Shift+Return).
 
 ### Grok senior engineer prompts + MAX_CHUNKS_FOR_PROMPT slider (Mar 2026)
 - **Senior engineer directives:** `buildSkillFormatPrompt` and `buildSubagentContext` system prompts rewritten with 7 explicit directives: address AI as senior engineer, clarity/conciseness, exact context preservation, flawless execution, ambiguity elimination, risk mitigation, domain isolation.
-- **Configurable MAX_CHUNKS_FOR_PROMPT:** `suggestChunksForPrompt(apiKey, userPrompt, descriptions, maxChunks?)` now accepts an optional cap. `buildContextForPrompt` and `buildSubagentContext` RPCs accept `params[2]` as `maxChunks`. `NodeBridgeService` forwards it. `DashboardViewModel` stores `@AppStorage("synapse.maxChunksForPrompt") var maxChunksForPrompt: Int = 5`. `DashboardView` adds a slider (1–10, step 1) in a new "Context Settings" section inside Tools & Settings.
+- **Configurable MAX_CHUNKS_FOR_PROMPT:** `suggestChunksForPrompt(apiKey, userPrompt, descriptions, maxChunks?)` now accepts an optional cap. Default 10 (was 5). `buildContextForPrompt` and `buildSubagentContext` RPCs accept `params[2]` as `maxChunks`. `NodeBridgeService` and `DashboardViewModel` default 10. `DashboardView` slider (1–10) in "Context Settings" inside Tools & Settings.
 
 ### Skill-format prompt and subagent context (Feature 1 & 2)
 - **Feature 1 – Main Send:** `buildContextForPrompt` now uses Grok to produce a **single skill.md-format** document (YAML frontmatter + ## Instructions, ## Examples, ## Troubleshooting, 800–1800 chars). Inputs: user prompt + DB snippets (selected chunks) + **memory snippets** (projectbrief, activeContext, progress, thoughts, learnings via `readSynapseFilesAsContext`). Node: `dbSnippets` from chunks + `memorySnippets` from grok; `grok.buildSkillFormatPrompt`; on failure, legacy @file block fallback. Block bubble label: "Skill prompt · X of Y chunks selected · copied to clipboard".

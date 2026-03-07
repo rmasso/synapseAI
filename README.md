@@ -26,6 +26,7 @@ Synapse is a macOS menu-bar app that turns your project knowledge into high-qual
 | Learnings updater | One click: Grok reads memory and appends dated bullets to `learnings.md` |
 | Stale index banner | Orange warning when memory >20 min old; prompts you to re-index or ask AI to update |
 | Additional index folder | Index `.cursor/`, `.Cursor/`, or any folder alongside `.synapse/` |
+| Full-project index | Optional: index all source files (Swift, JS, etc.); toggle in Tools & Settings, 2–6 s / 2–4 MB for small repos |
 | Shift+Return | Refines your prompt via Grok before sending |
 
 ---
@@ -60,6 +61,27 @@ Your project workspace/
 ```
 
 You (or your AI in Cursor) maintain the `.synapse/` files. Synapse indexes them and injects the right slice into Cursor when you hit ⌘⇧P or use the Dashboard.
+
+---
+
+### Full-project index (optional)
+
+By default only `.synapse/**/*.md` and any **additional index folder** (e.g. `.cursor`) are indexed. You can turn on **full-project indexing** so that all source files (Swift, JS, TS, JSON, etc.) under the project root are indexed too. That gives search and Grok richer context (file names, line ranges, code snippets).
+
+| Metric (Synapse repo sample) | Value |
+|------------------------------|--------|
+| Indexable files              | ~107 (swift, js, ts, md, json; excludes node_modules, .git) |
+| **Index time**               | **2–6 s** |
+| **DB size**                  | **2–4 MB** (on top of .synapse + .cursor .md) |
+
+**How to enable:** Dashboard → Tools & Settings → **Index full project** (toggle on). Then run **Index All**. A warning explains that indexing can take several seconds and increase database size.
+
+**Config (`.synapse/config.json`):**
+
+- `indexFolders` — array of relative paths (e.g. `[".cursor"]`) whose `.md` files are indexed.
+- `indexFullProject` — when `true`, Index All also walks the project (or `indexDirs`) and indexes by extension.
+- `indexExtensions` — optional; default `[".md", ".swift", ".js", ".ts", ".json"]`.
+- `indexDirs` — optional; restrict full-project walk to these relative paths (e.g. `["SynapseAI", "node", ".cursor", "memory-bank"]`). If omitted, the whole project root is walked (excluding `node_modules`, `.git`, `build`, `DerivedData`, `.synapse`).
 
 ---
 

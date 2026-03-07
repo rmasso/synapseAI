@@ -13,9 +13,9 @@
 
 ## What Works
 - Menu bar app (no dock); Open Dashboard = single window; New Project creates .synapse/ and templates (including learnings.md, codebase.md).
-- Node bridge: ping, setProject, indexAll, indexFile, search, suggestSkill, suggestLearnings, buildContextForPrompt, **buildSubagentContext**, getStats; fileChanged notifications.
+- Node bridge: ping, setProject, indexAll, indexFile, search, suggestSkill, suggestLearnings, buildContextForPrompt, **buildSubagentContext**, **chatTurn**, getStats; fileChanged notifications.
 - **Chat-style Dashboard:** type a prompt → full-screen ProcessAnimationView during API call → chat shows only **user prompt + final block** (skill-format or subagent). No FTS hit bubbles. Block automatically on clipboard. Fallback: legacy @file block if Grok fails.
-- **Subagent context:** Second button in prompt bar (person.2) builds memory-heavy context for a parallel agent; primary=.synapse memory, secondary=code snippets; result in orange bubble, copied to clipboard.
+- **Send mode menu:** Single send button in prompt bar (default icon = paperplane.fill); chevron opens upward menu to choose Prompt / Subagent / Chat (icon + title + description). Main button sends with selected mode. Same actions: buildContextForPrompt (prompt), buildSubagentContext (subagent), sendChatMessage (chat). Custom overlay, spring animation, hover highlights (SendMenuItemView).
 - Token savings: block bubble shows "Skill prompt · X of Y chunks · ~N tokens saved" when Grok filtered chunks.
 - **⌘⇧P injection fixed:** captures target app pid before async work; uses `CGEvent.postToPid` for reliable ⌘V delivery; uses last Dashboard chat prompt as search query.
 - **"Paste into [App]" button:** appears in Dashboard input bar when a block + target app are known; one-tap re-paste.
@@ -24,8 +24,9 @@
 - **Button feedback:** Copy/Done/Paste/Clear show animated "Copied", checkmark, etc.
 - **Delete confirmation:** Remove project shows "Delete Project?" alert before removal.
 - **Add project + tab:** + icon as rightmost tab; 2-step sheet (project + skills folder).
-- **Chat empty state:** Feature descriptions with icons (Generate Skill, Subagent, Refine).
-- Grok strict selection: 1–3 chunks preferred, domain isolation, ~300 token cost awareness.
+- **Chat empty state:** Feature descriptions with icons (Generate Skill, Subagent, Chat, Refine).
+- **Chat mode:** Multi-turn conversation; Grok can search_project; MarkdownTextView for user/assistant bubbles.
+- Grok selection: default 10 chunks; "include every directly relevant chunk" so the skill is self-contained for the executing agent; domain isolation; slider 1–10 in Dashboard.
 - Grok suggests/creates skill .md in .synapse/skills/; indexed; token count in Dashboard.
 - **Learnings:** .synapse/learnings.md template; "Update learnings" in Dashboard (Tools & Settings) runs Grok over project memory and appends dated bullets to learnings.md; preview in Dashboard; Cursor instructions mention learnings.md.
 - **Codebase map:** `.synapse/codebase.md` template (key files, UI controls, services); Grok gets correct types/names without indexing raw source; filled in for Synapse project itself.
@@ -48,6 +49,7 @@
 - **Multi-project tabs:** `SynapseProject` model; `FolderService` manages list + migration from single-project; `DashboardView` = `TabView` shell + `ProjectDashboardContent` per tab (isolated `DashboardViewModel`); tab switch activates project + calls `nodeBridge.setProject`; "Remove" button per project; hidden files enabled in folder picker.
 
 - **Skill format cleaned:** `buildSkillFormatPrompt` outputs YAML + `## Instructions` + `## Examples` only; no `## Troubleshooting`.
+- **Skill prompt improvements (Mar 2026):** Type-name surfacing (prompt mentions e.g. ProjectDashboardContent → search and prepend those chunks). buildSkillFormatPrompt: max_tokens 3072, skill length 2500–4000 chars, numbered Instructions, mixed-snippet clarification, "existing behavior" line, Examples complete. Optimize for executing agent: default 10 chunks, "include every relevant chunk" (no "aim for 1–3"); DB 12K / memory 6K chars to Grok so skill embeds full code.
 - **Stale index banner:** orange two-line banner appears when project not indexed (or 20+ min since last index); fires without user interaction via 60 s timer; includes AI prompt hint; `isIndexStale` now correctly returns `true` on never-indexed projects.
 - **Suggest skill on no tags:** after `indexAll`, if additional folder has no tag-bearing chunks → surfaces "Generate Skill" prompt in Tools & Settings.
 - **Shift+Return → Send:** keyboard shortcut now triggers `buildContextForPrompt` (was `optimizePrompt`).

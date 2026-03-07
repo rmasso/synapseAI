@@ -29,6 +29,8 @@ final class NodeBridgeService: ObservableObject {
     @Published private(set) var lastInjectedBlock: String = ""
     /// Last non-Synapse app that was frontmost — target for the "Paste" button.
     @Published private(set) var lastTargetApp: (name: String, pid: pid_t)?
+    /// Progress message for Self Synapse operation.
+    @Published private(set) var selfSynapseProgress: String?
 
     func setLastInjectionDate(_ date: Date?) {
         lastInjectionDate = date
@@ -36,6 +38,10 @@ final class NodeBridgeService: ObservableObject {
 
     func setLastInjectedBlock(_ block: String) {
         lastInjectedBlock = block
+    }
+
+    func clearSelfSynapseProgress() {
+        selfSynapseProgress = nil
     }
 
     private var process: Process?
@@ -289,9 +295,12 @@ final class NodeBridgeService: ObservableObject {
                                     cont.resume(returning: .failure(NSError(domain: "NodeBridge", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unknown response"])))
                                 }
                             }
-                        } else if let method = json["method"] as? String, method == "fileChanged",
-                                  let params = json["params"] as? [String: Any], let path = params["path"] as? String {
-                            self.lastFileChange = path
+                        } else if let method = json["method"] as? String {
+                            if method == "fileChanged", let params = json["params"] as? [String: Any], let path = params["path"] as? String {
+                                self.lastFileChange = path
+                            } else if method == "selfSynapseProgress", let params = json["params"] as? [[String: Any]], let info = params.first, let msg = info["message"] as? String {
+                                self.selfSynapseProgress = msg
+                            }
                         }
                     }
                 }
@@ -451,10 +460,27 @@ final class NodeBridgeService: ObservableObject {
         }
     }
 
+    /// Fill out .synapse memory files from project context. Chunked iteration for large folders.
+    func selfSynapse(apiKey: String) async -> Result<(filesUpdated: [String], inputTokens: Int, outputTokens: Int), Error> {
+        let result: Result<Any, Error> = await call("selfSynapse", params: [apiKey])
+        switch result {
+        case .success(let any):
+            guard let dict = any as? [String: Any],
+                  let filesArr = dict["filesUpdated"] as? [String] else {
+                return .failure(NSError(domain: "NodeBridge", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid selfSynapse response"]))
+            }
+            let inputTokens = dict["inputTokens"] as? Int ?? 0
+            let outputTokens = dict["outputTokens"] as? Int ?? 0
+            return .success((filesUpdated: filesArr, inputTokens: inputTokens, outputTokens: outputTokens))
+        case .failure(let err):
+            return .failure(err)
+        }
+    }
+
     /// User enters vague prompt; Grok gets index descriptions and suggests chunks; returns block (skill-format markdown or legacy) for clipboard.
-    /// maxChunks: user-configurable cap forwarded to Node (1–10; default 5).
+    /// maxChunks: user-configurable cap forwarded to Node (1–10; default 10 for a richer skill for the executing agent).
     /// memoryFirstMode: when true, prioritize memory chunks (.synapse/) in chunk selection.
-    func buildContextForPrompt(apiKey: String, userPrompt: String, maxChunks: Int = 5, memoryFirstMode: Bool = false) async -> Result<(block: String, optimizedPrompt: String?, chunkCount: Int, totalDescriptions: Int, estimatedSavedTokens: Int, inputTokens: Int, outputTokens: Int), Error> {
+    func buildContextForPrompt(apiKey: String, userPrompt: String, maxChunks: Int = 10, memoryFirstMode: Bool = false) async -> Result<(block: String, optimizedPrompt: String?, chunkCount: Int, totalDescriptions: Int, estimatedSavedTokens: Int, inputTokens: Int, outputTokens: Int), Error> {
         let result: Result<Any, Error> = await call("buildContextForPrompt", params: [apiKey, userPrompt, maxChunks, memoryFirstMode])
         switch result {
         case .success(let any):
@@ -474,9 +500,27 @@ final class NodeBridgeService: ObservableObject {
         }
     }
 
+    /// Multi-turn chat with Grok. Grok can search the project via search_project tool.
+    /// messages: array of [ "role": "user"|"assistant", "content": "..." ].
+    func chatTurn(apiKey: String, messages: [[String: Any]]) async -> Result<(content: String, inputTokens: Int, outputTokens: Int), Error> {
+        let result: Result<Any, Error> = await call("chatTurn", params: [apiKey, messages])
+        switch result {
+        case .success(let any):
+            guard let dict = any as? [String: Any],
+                  let content = dict["content"] as? String else {
+                return .failure(NSError(domain: "NodeBridge", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid chat response"]))
+            }
+            let inputTokens = dict["inputTokens"] as? Int ?? 0
+            let outputTokens = dict["outputTokens"] as? Int ?? 0
+            return .success((content: content, inputTokens: inputTokens, outputTokens: outputTokens))
+        case .failure(let err):
+            return .failure(err)
+        }
+    }
+
     /// Build context package for a parallel subagent (memory-heavy). Returns block + token counts.
-    /// maxChunks: user-configurable cap for supplemental DB snippets (1–10; default 5).
-    func buildSubagentContext(apiKey: String, userPrompt: String, maxChunks: Int = 5) async -> Result<(block: String, inputTokens: Int, outputTokens: Int), Error> {
+    /// maxChunks: user-configurable cap for supplemental DB snippets (1–10; default 10).
+    func buildSubagentContext(apiKey: String, userPrompt: String, maxChunks: Int = 10) async -> Result<(block: String, inputTokens: Int, outputTokens: Int), Error> {
         let result: Result<Any, Error> = await call("buildSubagentContext", params: [apiKey, userPrompt, maxChunks])
         switch result {
         case .success(let any):

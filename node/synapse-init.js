@@ -74,4 +74,4 @@ function initSynapseFolder(rootPath) {
   return { ok: true, path: synapseDir };
 }
 
-module.exports = { initSynapseFolder };
+module.exports = { initSynapseFolder, TEMPLATES };

@@ -7,6 +7,15 @@ import Foundation
 import AppKit
 import SwiftUI
 
+// MARK: - Memory map cache (persist map across tab/chat changes)
+
+struct MemoryMapCache {
+    let projectPath: String
+    let nodes: [MemoryMapNode]
+    let connections: [MemoryMapConnection]
+    let nodePositions: [String: CGPoint]
+}
+
 // MARK: - Chat message model
 
 struct ChatMessage: Identifiable {
@@ -17,6 +26,8 @@ struct ChatMessage: Identifiable {
         case block(chunkCount: Int, totalAvailable: Int, estimatedSavedTokens: Int, inputTokens: Int, outputTokens: Int)
         /// Subagent context (memory-heavy package for parallel agent)
         case subagentContext(inputTokens: Int, outputTokens: Int)
+        /// Chat mode: natural-language reply from Grok (can search project)
+        case assistant(inputTokens: Int, outputTokens: Int)
         /// Shift+Return refined prompt
         case optimized(inputTokens: Int, outputTokens: Int)
         case error
@@ -44,6 +55,9 @@ final class DashboardViewModel: ObservableObject {
     @Published var isUpdatingLearnings = false
     @Published var learningsError: String?
     @Published var learningsSuccess: String?
+    @Published var isSelfSynapsing = false
+    @Published var selfSynapseSuccess: String?
+    @Published var selfSynapseError: String?
     @Published var grokTokensInput: Int = 0
     @Published var grokTokensOutput: Int = 0
     @Published var memoryFiles: [(name: String, modified: Date)] = []
@@ -51,6 +65,10 @@ final class DashboardViewModel: ObservableObject {
     @Published var learningsPreview: String = ""
     @Published var lastInjectionDate: Date?
     @Published var dbStats: (documentCount: Int, chunkCount: Int, dbSizeBytes: Int64)?
+    /// True while indexAll is in progress (show loader near chunk count).
+    @Published var isIndexing = false
+    /// After indexAll: positive = chunks grew (green), negative = reduced (red). Cleared after ~3s.
+    @Published var chunkCountDelta: Int? = nil
     @Published var isIngesting = false
     @Published var ingestSuccessMessage: String?
     @Published var ingestError: String?
@@ -63,6 +81,7 @@ final class DashboardViewModel: ObservableObject {
     @Published var subagentContextError: String?
     @Published var subagentContextSuccess: String?
     @Published var isOptimizingPrompt = false
+    @Published var isBuildingChat = false
 
     // Additional index folder
     @Published var extraFolderSuccess: String?
@@ -75,12 +94,15 @@ final class DashboardViewModel: ObservableObject {
     @Published var showOnboarding: Bool = false
 
     // Context chunk limit (user-configurable via slider; 1–10; default 5)
-    @AppStorage("synapse.maxChunksForPrompt") var maxChunksForPrompt: Int = 5
+    @AppStorage("synapse.maxChunksForPrompt") var maxChunksForPrompt: Int = 10
     /// When true, prioritize memory chunks (.synapse/) in chunk selection for buildContextForPrompt.
     @AppStorage("synapse.memoryFirstMode") var memoryFirstMode: Bool = false
 
     // Chat history
     @Published var chatMessages: [ChatMessage] = []
+
+    /// Cached memory map data keyed by project path; avoids reload when switching tabs or chat view.
+    @Published var memoryMapCache: MemoryMapCache?
 
     func refresh(from nodeBridge: NodeBridgeService) {
         nodeConnected = nodeBridge.isConnected
@@ -107,10 +129,21 @@ final class DashboardViewModel: ObservableObject {
     }
 
     func indexAll(nodeBridge: NodeBridgeService, folderService: FolderService? = nil, projectId: UUID? = nil) async {
+        let previousChunkCount = dbStats?.chunkCount
+        isIndexing = true
+        chunkCountDelta = nil
+        defer { isIndexing = false }
         switch await nodeBridge.indexAll() {
         case .success(let count):
             indexCount = count
             await refreshStats(nodeBridge: nodeBridge)
+            memoryMapCache = nil
+            let newChunkCount = dbStats?.chunkCount ?? 0
+            chunkCountDelta = newChunkCount - (previousChunkCount ?? 0)
+            Task {
+                try? await Task.sleep(for: .seconds(3))
+                chunkCountDelta = nil
+            }
             if let folderService {
                 refreshFolderContent(folderService: folderService)
                 if let pid = projectId { folderService.recordIndexTime(for: pid) }
@@ -122,6 +155,7 @@ final class DashboardViewModel: ObservableObject {
             }
         case .failure:
             indexCount = nil
+            chunkCountDelta = nil
         }
     }
 
@@ -198,6 +232,28 @@ final class DashboardViewModel: ObservableObject {
             refreshFolderContent(folderService: folderService)
         case .failure(let err):
             learningsError = err.localizedDescription
+        }
+    }
+
+    func runSelfSynapse(apiKey: String, nodeBridge: NodeBridgeService, folderService: FolderService) async {
+        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            selfSynapseError = "Enter Grok API key"
+            return
+        }
+        selfSynapseError = nil
+        selfSynapseSuccess = nil
+        isSelfSynapsing = true
+        nodeBridge.clearSelfSynapseProgress()
+        defer { isSelfSynapsing = false }
+        switch await nodeBridge.selfSynapse(apiKey: apiKey) {
+        case .success(let out):
+            grokTokensInput += out.inputTokens
+            grokTokensOutput += out.outputTokens
+            let count = out.filesUpdated.count
+            selfSynapseSuccess = "Updated \(count) file\(count == 1 ? "" : "s")"
+            refreshFolderContent(folderService: folderService)
+        case .failure(let err):
+            selfSynapseError = err.localizedDescription
         }
     }
 
@@ -297,6 +353,45 @@ final class DashboardViewModel: ObservableObject {
             subagentContextError = err.localizedDescription
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString("Subagent context error: \(err.localizedDescription)", forType: .string)
+        }
+    }
+
+    /// Chat mode: multi-turn conversation. Does NOT clear chat; appends user + assistant.
+    func sendChatMessage(apiKey: String, nodeBridge: NodeBridgeService) async {
+        let prompt = promptForContext.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return }
+        guard !isBuildingContext, !isBuildingSubagentContext, !isOptimizingPrompt, !isBuildingChat else { return }
+
+        let hasGrok = !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard hasGrok else {
+            chatMessages.append(ChatMessage(kind: .error, text: "Enter Grok API key in Tools & Settings to use Chat mode."))
+            return
+        }
+
+        chatMessages.append(ChatMessage(kind: .user, text: prompt))
+        promptForContext = ""
+
+        isBuildingChat = true
+        defer { isBuildingChat = false }
+
+        let messages: [[String: Any]] = chatMessages.compactMap { msg in
+            switch msg.kind {
+            case .user: return ["role": "user", "content": msg.text]
+            case .assistant: return ["role": "assistant", "content": msg.text]
+            default: return nil
+            }
+        }
+
+        switch await nodeBridge.chatTurn(apiKey: apiKey, messages: messages) {
+        case .success(let out):
+            grokTokensInput += out.inputTokens
+            grokTokensOutput += out.outputTokens
+            chatMessages.append(ChatMessage(
+                kind: .assistant(inputTokens: out.inputTokens, outputTokens: out.outputTokens),
+                text: out.content
+            ))
+        case .failure(let err):
+            chatMessages.append(ChatMessage(kind: .error, text: "Chat failed: \(err.localizedDescription)"))
         }
     }
 
