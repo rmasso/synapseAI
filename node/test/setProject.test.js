@@ -43,7 +43,7 @@ test("setProject creates .synapse and template files", async () => {
 
   const synapseDir = path.join(tmpDir, ".synapse");
   assert.ok(fs.existsSync(synapseDir));
-  const files = ["projectbrief.md", "activeContext.md", "progress.md", "thoughts.md", "learnings.md", "codebase.md"];
+  const files = ["projectbrief.md", "activeContext.md", "progress.md", "thoughts.md", "learnings.md", "codebase.md", "ui-ux-memory.md"];
   for (const f of files) {
     assert.ok(fs.existsSync(path.join(synapseDir, f)), f + " should exist");
   }

@@ -58,7 +58,7 @@ async function chatCompletion(apiKey, messages, options = {}) {
 
 function readSynapseFilesAsContext(projectRoot) {
   const synapseDir = path.join(projectRoot, ".synapse");
-  const names = ["projectbrief.md", "activeContext.md", "progress.md", "thoughts.md", "learnings.md", "codebase.md"];
+  const names = ["projectbrief.md", "activeContext.md", "progress.md", "thoughts.md", "learnings.md", "codebase.md", "ui-ux-memory.md"];
   const parts = [];
   for (const name of names) {
     const filePath = path.join(synapseDir, name);
@@ -612,7 +612,7 @@ ${memoryContext ? `--- Project memory (.synapse) ---\n${memoryContext}\n\n` : ""
 
 const SELF_SYNAPSE_CHARS_PER_BATCH = 15000;
 const SELF_SYNAPSE_MAX_ITERATIONS = 8;
-const MEMORY_FILE_NAMES = ["projectbrief.md", "activeContext.md", "progress.md", "thoughts.md", "learnings.md", "codebase.md"];
+const MEMORY_FILE_NAMES = ["projectbrief.md", "activeContext.md", "progress.md", "thoughts.md", "learnings.md", "codebase.md", "ui-ux-memory.md"];
 
 /**
  * Parse Grok output with --- filename --- delimiters. Returns Map<filename, content>.

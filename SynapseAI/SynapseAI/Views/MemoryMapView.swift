@@ -119,6 +119,30 @@ struct MemoryMapView: View {
         }
     }
 
+    /// Expands base highlight set by adding connected nodes (BFS) until ~3× count for more visual drama.
+    private func expandedHighlightIds(base: Set<String>, connections: [MemoryMapConnection], nodeIds: Set<String>, targetMultiplier: Int = 3) -> Set<String> {
+        var result = base
+        let targetCount = max(base.count * targetMultiplier, base.count + 1)
+        if result.count >= targetCount { return result }
+        var frontier = base
+        while result.count < targetCount {
+            var nextFrontier = Set<String>()
+            for conn in connections {
+                if frontier.contains(conn.fromId), nodeIds.contains(conn.toId), !result.contains(conn.toId) {
+                    result.insert(conn.toId)
+                    nextFrontier.insert(conn.toId)
+                }
+                if frontier.contains(conn.toId), nodeIds.contains(conn.fromId), !result.contains(conn.fromId) {
+                    result.insert(conn.fromId)
+                    nextFrontier.insert(conn.fromId)
+                }
+            }
+            if nextFrontier.isEmpty { break }
+            frontier = nextFrontier
+        }
+        return result
+    }
+
     private var headerBar: some View {
         HStack {
             Button {
@@ -175,7 +199,8 @@ struct MemoryMapView: View {
         let currentPositions = nodePositions
         let currentRevealPhase = revealPhase
         let currentSelectedNodeId = selectedNodeId
-        let currentHighlightIds = lastContextHighlightIds
+        let nodeIds = Set(currentNodes.map(\.id))
+        let currentHighlightIds = expandedHighlightIds(base: lastContextHighlightIds, connections: currentConnections, nodeIds: nodeIds)
         return TimelineView(.animation) { timeline in
             let phase = CGFloat(timeline.date.timeIntervalSinceReferenceDate) * 0.5
             GeometryReader { geo in
@@ -344,7 +369,9 @@ struct MemoryMapView: View {
         for conn in visibleConns {
             guard let from = nodePositions[conn.fromId], let to = nodePositions[conn.toId] else { continue }
             let isSelected = selectedNodeId != nil && (conn.fromId == selectedNodeId || conn.toId == selectedNodeId)
-            let isLastContext = lastContextHighlightIds.contains(conn.fromId) && lastContextHighlightIds.contains(conn.toId)
+            let fromHighlighted = lastContextHighlightIds.contains(conn.fromId)
+            let toHighlighted = lastContextHighlightIds.contains(conn.toId)
+            let isLastContext = fromHighlighted || toHighlighted
             let isHighlighted = isSelected || isLastContext
             let strokeColor: Color = isSelected ? Color.accentColor : (isLastContext ? Color.blue : Color.gray.opacity(0.5))
             let fFrom = applyFloat(from, phase: phase)
